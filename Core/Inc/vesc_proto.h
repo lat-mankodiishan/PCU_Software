@@ -1,0 +1,55 @@
+#ifndef VESC_PROTO_H
+#define VESC_PROTO_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "periph_wrappers.h"   /* can_frame_t */
+
+#ifndef VESC_ID_SEND_CURR_DEM
+#define VESC_ID_SEND_CURR_DEM           0x101u
+#endif
+#ifndef VESC_ID_GET_RECT_STATE_CONCISE
+#define VESC_ID_GET_RECT_STATE_CONCISE  0x201u
+#endif
+
+/* Powertrain mode — mirrors FC flight state, see control_law. */
+typedef enum {
+    VESC_MODE_IDLE    = 0,
+    VESC_MODE_TAKEOFF = 1,
+    VESC_MODE_CLIMB   = 2,
+    VESC_MODE_CRUISE  = 3,
+    VESC_MODE_LAND    = 4,
+    VESC_MODE_FAULT   = 5,
+} vesc_mode_t;
+
+typedef struct {
+    int16_t     I_rect_cmd_cA;   /* 0.01 A/LSB, signed */
+    vesc_mode_t mode;
+    uint8_t     seq;
+} vesc_curr_dem_t;
+
+typedef struct {
+    uint16_t V_dc_cV;            /* 0.01 V/LSB, unsigned, 0..655.35 V */
+    int16_t  I_dc_cA;            /* 0.01 A/LSB, signed */
+    uint16_t gen_rpm;            /* 1 rpm/LSB */
+    int8_t   igbt_temp_C;        /* 1 °C/LSB */
+    uint8_t  fault_bits;         /* low 4 bits used (0..15) */
+    uint8_t  seq;                /* low 4 bits used, wraps every 16 frames */
+} vesc_rect_state_t;
+
+typedef enum {
+    VESC_DECODE_OK = 0,
+    VESC_DECODE_BAD_ID,
+    VESC_DECODE_BAD_LEN,
+} vesc_decode_t;
+
+uint8_t       vesc_crc8(const uint8_t *buf, uint8_t len);
+
+void          vesc_proto_encode_curr_dem(const vesc_curr_dem_t *in,
+                                         can_frame_t *out);
+
+vesc_decode_t vesc_proto_decode_rect_state_concise(const can_frame_t *in,
+                                                   vesc_rect_state_t *out);
+
+#endif /* VESC_PROTO_H */
+

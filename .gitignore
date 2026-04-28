@@ -1,0 +1,49 @@
+# --- Build artifacts ----------------------------------------------------
+build/
+mx.scratch
+*.o
+*.obj
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.su
+
+# --- CMake leftovers ----------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# --- Cloned generators / external repos (regenerable) -------------------
+# tools/ holds dronecan_dsdlc, DSDL/, libcanard/ — clone fresh per repo
+# README; not vendored here.
+tools/
+
+# --- IDE / editor files -------------------------------------------------
+.vscode/
+.idea/
+.cproject
+.project
+.settings/
+*.launch
+*.user
+*.bak
+*.swp
+*~
+!.settings
+
+# --- OS clutter ---------------------------------------------------------
+.DS_Store
+Thumbs.db
+
+# --- STM32CubeIDE -------------------------------------------------------
+.metadata/
+RemoteSystemsTempFiles/
+Debug/
+Release/
+
+# --- Logs ---------------------------------------------------------------
+*.log

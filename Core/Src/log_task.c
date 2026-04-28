@@ -1,0 +1,111 @@
+#include "log_task.h"
+#include "powertrain_state.h"
+#include "sensor_task.h"
+#include "fatfs.h"
+#include "cmsis_os2.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include <stdio.h>
+#include <string.h>
+
+#define LOG_PERIOD_MS    100         /* 10 Hz */
+#define LOG_SYNC_EVERY    10         /* f_sync once per second */
+
+static StaticTask_t s_tcb;
+static StackType_t  s_stack[512];    /* 2 KB */
+
+static FATFS    s_fs;
+static FIL      s_file;
+static char     s_line[256];
+static char     s_filename[16];
+static bool     s_mounted = false;
+static uint32_t s_writes_since_sync = 0;
+
+static void log_task(void *arg);
+
+void log_task_start(void) {
+    static const osThreadAttr_t tattr = {
+        .name       = "log",
+        .cb_mem     = &s_tcb,
+        .cb_size    = sizeof(s_tcb),
+        .stack_mem  = s_stack,
+        .stack_size = sizeof(s_stack),
+        .priority   = osPriorityLow,       /* prio 2 */
+    };
+    osThreadNew(log_task, NULL, &tattr);
+}
+
+/* Find next available LOGNNNN.CSV; fall back to LOG.CSV if all used. */
+static void pick_filename(void) {
+    for (int i = 0; i < 10000; ++i) {
+        snprintf(s_filename, sizeof(s_filename), "LOG%04d.CSV", i);
+        FILINFO fno;
+        if (f_stat(s_filename, &fno) == FR_NO_FILE) return;
+    }
+    strcpy(s_filename, "LOG.CSV");
+}
+
+static void log_task(void *arg) {
+    (void)arg;
+
+    /* Mount + open + header. On any failure, fall through to a quiet idle
+     * loop — log_task is non-essential, must never block other tasks. */
+    if (f_mount(&s_fs, "", 1) != FR_OK) {
+        for (;;) osDelay(1000);
+    }
+    s_mounted = true;
+    pick_filename();
+    if (f_open(&s_file, s_filename, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+        for (;;) osDelay(1000);
+    }
+    f_puts("ms,mode,I_cmd_cA,V_dc_cV,I_dc_cA,rpm,igbt_C,faults,thr_pct,soc_pct,"
+           "tc1_cdeg,tc2_cdeg,tc3_cdeg,adc0,adc1,adc2,adc3\n", &s_file);
+    f_sync(&s_file);
+
+    uint32_t next = osKernelGetTickCount();
+    for (;;) {
+        /* --- Snapshot powertrain state ---------------------------------- */
+        powertrain_state_t pt;
+        osMutexAcquire(g_pt_mtx, osWaitForever);
+        pt = g_pt;
+        osMutexRelease(g_pt_mtx);
+
+        /* --- Snapshot sensor data --------------------------------------- */
+        sensor_data_t sd;
+        sensor_data_get(&sd);
+
+        /* --- Format CSV row --------------------------------------------- *
+         * Thermocouple temps written as int32 cdeg (×100 °C) to avoid
+         * pulling printf-float into the link. Decode by /100 in post-proc. */
+        int n = snprintf(s_line, sizeof(s_line),
+            "%lu,%u,%d,%u,%d,%u,%d,0x%04X,%u,%u,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
+            (unsigned long)osKernelGetTickCount(),
+            (unsigned)pt.mode,
+            pt.I_rect_cmd_cA,
+            pt.rect_state.V_dc_cV,
+            pt.rect_state.I_dc_cA,
+            pt.rect_state.gen_rpm,
+            pt.rect_state.igbt_temp_C,
+            pt.fault_bits,
+            pt.fc_throttle_dem_pct,
+            pt.bms_soc_pct,
+            (long)(sd.tc[0].tc_temp * 100.0f),
+            (long)(sd.tc[1].tc_temp * 100.0f),
+            (long)(sd.tc[2].tc_temp * 100.0f),
+            (long)sd.adc.ch[0].raw,
+            (long)sd.adc.ch[1].raw,
+            (long)sd.adc.ch[2].raw,
+            (long)sd.adc.ch[3].raw);
+
+        UINT bw;
+        if (n > 0 && f_write(&s_file, s_line, (UINT)n, &bw) == FR_OK) {
+            if (++s_writes_since_sync >= LOG_SYNC_EVERY) {
+                f_sync(&s_file);
+                s_writes_since_sync = 0;
+            }
+        }
+
+        next += LOG_PERIOD_MS;
+        osDelayUntil(next);
+    }
+}
