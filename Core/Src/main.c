@@ -104,8 +104,13 @@ int main(void)
   MX_SPI3_Init();
   MX_TIM1_Init();
   MX_FATFS_Init();
-  MX_IWDG_Init();
+  // MX_IWDG_Init();  /* Disabled for rectifier-link bring-up — re-enable when supervisor_task is back. */
   /* USER CODE BEGIN 2 */
+  #if defined(DEBUG)
+  // __HAL_DBGMCU_FREEZE_IWDG();
+  __HAL_DBGMCU_FREEZE_CAN1();
+  __HAL_DBGMCU_FREEZE_CAN2();
+#endif
 
   /* USER CODE END 2 */
 

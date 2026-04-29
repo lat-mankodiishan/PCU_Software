@@ -31,7 +31,7 @@ void ADC_SetStart(uint8_t state){
 
 uint8_t ADC_SPIByteTransfer(uint8_t tx){
 	uint8_t rx =0;
-	HAL_SPI_TransmitReceive(&hspi3, &tx, &rx, 1, HAL_MAX_DELAY);
+	HAL_SPI_TransmitReceive(&hspi3, &tx, &rx, 1, 100);
 	return rx;
 }
 
@@ -96,7 +96,7 @@ bool ADC_ReadRaw(int32_t *raw, uint8_t *status){
       uint8_t rx[7] = {0};
 
       ADC_SetCS(0);
-      HAL_SPI_TransmitReceive(&hspi3, tx, rx, 7, HAL_MAX_DELAY);
+      HAL_SPI_TransmitReceive(&hspi3, tx, rx, 7, 100);
       ADC_SetCS(1);
 
       *status = rx[1];

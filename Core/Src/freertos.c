@@ -145,7 +145,7 @@ void vApplicationMallocFailedHook(void)
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
-  control_law_self_test();
+  //control_law_self_test();
 
   /* USER CODE END Init */
 
@@ -170,16 +170,18 @@ void MX_FREERTOS_Init(void) {
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
+  /* Rectifier-link bring-up: only what rectifier_task needs.
+   * Re-enable the others once the PCU↔VESC protocol is verified end-to-end. */
   pt_init();
   can_mgr_init();
   rectifier_task_start();
-  supervisor_task_start();
-  pdb_task_start();
-  sensor_task_start();
-  log_task_start();
-  fc_link_task_start();
-  bms_task_start();
-  ecu_task_start();
+  // supervisor_task_start();
+  // pdb_task_start();
+  // sensor_task_start();
+  // log_task_start();
+  // fc_link_task_start();
+  // bms_task_start();
+  // ecu_task_start();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -198,16 +200,19 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* Bench stub — fc_link_task / bms_task will replace these later. */
-  pt_set_bms_inputs(7000);                          /* 70 % SOC */
+  /* Rectifier-link bring-up: inject a constant setpoint so 0x101 frames carry
+   * something other than zero. supervisor_task is disabled, so nothing else
+   * writes I_rect_cmd_cA / mode. Adjust this single line on the bench to
+   * sweep current; or write g_pt.I_rect_cmd_cA directly via the debugger. */
+  pt_set_bms_inputs(7000);                          /* 70 % SOC (placeholder) */
+  pt_set_setpoint(100, VESC_MODE_CRUISE);           /* 1.00 A constant */
 
-  //pt_set_setpoint(100, VESC_MODE_CRUISE);   /* 1.00 A — bench */
-
-  /* Infinite loop */
+  /* defaultTask kicks the IWDG (~64 ms timeout) while supervisor_task is
+   * disabled. Move this back to supervisor_task once it's re-enabled. */
   for(;;)
   {
-    pt_set_fc_inputs(VESC_MODE_CRUISE, 5000);       
-    osDelay(1);
+    watchdog_refresh();
+    osDelay(20);
   }
   /* USER CODE END StartDefaultTask */
 }
