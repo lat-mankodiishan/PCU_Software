@@ -36,7 +36,7 @@ void rectifier_task_start(void) {
                                sizeof(can_frame_t),
                                &qattr);
 
-    can_mgr_subscribe(CAN_BUS_ENGINE,
+    can_mgr_subscribe(CAN_BUS_POWERTRAIN,
                       VESC_ID_GET_RECT_STATE_CONCISE,
                       0x7FFu,                    /* exact-match 11-bit */
                       false,
@@ -83,7 +83,7 @@ static void rectifier_task(void *arg) {
 
         can_frame_t tx;
         vesc_proto_encode_curr_dem(&cmd, &tx);
-        (void)can_mgr_send(CAN_BUS_ENGINE, &tx, 0);
+        (void)can_mgr_send(CAN_BUS_POWERTRAIN, &tx, 0);
 
         /* --- Staleness check ------------------------------------------ */
         osMutexAcquire(g_pt_mtx, osWaitForever);

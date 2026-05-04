@@ -153,7 +153,7 @@ CubeMX-generated init files. Defines portable types
 (`can_bus_t`, `can_frame_t`).
 
 - **`handle_of(bus)`** *(static)* — translates `can_bus_t` enum
-  (`CAN_BUS_DRONECAN`, `CAN_BUS_ENGINE`) to the HAL's `&hcan1`/`&hcan2`.
+  (`CAN_BUS_AVIONICS`, `CAN_BUS_POWERTRAIN`) to the HAL's `&hcan1`/`&hcan2`.
   Sole place this mapping lives.
 - **`can_hw_init(bus)`** — enables the four IRQs we use (RX FIFO0
   pending, TX mailbox empty, bus-off, error) and calls `HAL_CAN_Start`.
@@ -424,7 +424,7 @@ setpoint.
 
 - **`clamp_i16(v, lo, hi)`** *(static inline)*.
 - **`rectifier_task_start()`** — creates a static 8-deep RX queue,
-  `can_mgr_subscribe(CAN_BUS_ENGINE, 0x201, 0x7FF, ext=false)`, then
+  `can_mgr_subscribe(CAN_BUS_POWERTRAIN, 0x201, 0x7FF, ext=false)`, then
   creates the task.
 - **`rectifier_task`** *(static)* loop, every 5 ms:
   1. Drain RX queue → `vesc_proto_decode_rect_state_concise` → on OK,
@@ -493,7 +493,7 @@ touches FatFs.
 `canard.h` and the generated codecs aren't present.
 
 - **`fc_link_task_start()`** — creates the static 32-deep RX queue,
-  `can_mgr_subscribe(CAN_BUS_DRONECAN, 0, 0, ext=true)` (match-all),
+  `can_mgr_subscribe(CAN_BUS_AVIONICS, 0, 0, ext=true)` (match-all),
   `canardInit` over a 2 KB static memory pool,
   `canardSetLocalNodeID(50)`, then creates the task.
 - **`should_accept`** *(static)* — libcanard filter callback. Accepts
@@ -524,7 +524,7 @@ touches FatFs.
 100 ms tick, `osPriorityNormal` (3), 1 KB stack. **Placeholder.**
 
 - **`bms_task_start()`** — creates 8-deep RX queue, match-all subscribe
-  on `CAN_BUS_ENGINE` (will move to Bus 3 on H7), creates the task.
+  on `CAN_BUS_POWERTRAIN` (will move to Bus 3 on H7), creates the task.
 - **`parse_bms_frame(*f)`** *(static)* — **stub returning false.**
   TODO: decode protocol, write `g_pt.bms_*`, stamp `bms_input_tick`,
   return `true`.
@@ -541,7 +541,7 @@ plan is Loweheiser MAVLink over UART (see
 `memory/project_ecu_loweheiser_mavlink.md`). Task must be refactored to
 a UART RX handler.
 
-- **`ecu_task_start()`** — match-all subscribe on `CAN_BUS_ENGINE`
+- **`ecu_task_start()`** — match-all subscribe on `CAN_BUS_POWERTRAIN`
   (wrong long-term — will move to UART). Creates task.
 - **`parse_ecu_frame(*f)`** *(static)* — stub returning false.
 - **`ecu_task`** *(static)* — same shape as `bms_task`.

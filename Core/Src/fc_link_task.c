@@ -157,7 +157,7 @@ static void drain_canard_tx(void) {
         f.rtr = (frame->id & CANARD_CAN_FRAME_RTR) ? 1 : 0;
         f.dlc = frame->data_len;
         memcpy(f.data, frame->data, frame->data_len);
-        if (can_mgr_send(CAN_BUS_DRONECAN, &f, 0)) {
+        if (can_mgr_send(CAN_BUS_AVIONICS, &f, 0)) {
             canardPopTxQueue(&s_canard);
         } else {
             break;                                    /* HW + SW queue full — retry next tick */
@@ -225,7 +225,7 @@ void fc_link_task_start(void) {
 
     /* Subscribe to ALL extended-frame traffic on CAN1; libcanard's
      * shouldAcceptTransfer filters by DTID. One filter bank consumed. */
-    can_mgr_subscribe(CAN_BUS_DRONECAN, 0u, 0u, true, s_rx_q);
+    can_mgr_subscribe(CAN_BUS_AVIONICS, 0u, 0u, true, s_rx_q);
 
     canardInit(&s_canard, s_mem_pool, sizeof(s_mem_pool),
                on_transfer_received, should_accept, NULL);

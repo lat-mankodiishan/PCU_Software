@@ -5,8 +5,8 @@
 #include <stdbool.h>
 
 typedef enum {
-    CAN_BUS_DRONECAN = 0,   /* CAN1 — PCU<->FC */
-    CAN_BUS_ENGINE   = 1,   /* CAN2 — Rectifier+ECU+Laptop */
+    CAN_BUS_AVIONICS   = 0, /* CAN1 — Pixhawk DroneCAN + Loweheiser ECU @ 500k */
+    CAN_BUS_POWERTRAIN = 1, /* CAN2 — VESC rectifier + Daly BMS @ 250k */
     CAN_BUS_COUNT
 } can_bus_t;
 

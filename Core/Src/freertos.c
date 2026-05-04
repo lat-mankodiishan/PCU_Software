@@ -200,19 +200,61 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* Rectifier-link bring-up: inject a constant setpoint so 0x101 frames carry
-   * something other than zero. supervisor_task is disabled, so nothing else
-   * writes I_rect_cmd_cA / mode. Adjust this single line on the bench to
-   * sweep current; or write g_pt.I_rect_cmd_cA directly via the debugger. */
-  pt_set_bms_inputs(7000);                          /* 70 % SOC (placeholder) */
-  pt_set_setpoint(100, VESC_MODE_CRUISE);           /* 1.00 A constant */
+  /* Flight-stand-in profile: with no FC attached, walk a phase table that
+   * mimics a representative mission. supervisor_task is disabled, so we are
+   * the sole writer of I_rect_cmd_cA / mode. Linear-ramp between phases so
+   * the rectifier_task / VESC see a continuously varying setpoint instead
+   * of jumps. Replace this with fc_link_task once an FC is wired in. */
+ // pt_set_bms_inputs(7000);   /* 70 % SOC, placeholder for bench */
 
-  /* defaultTask kicks the IWDG (~64 ms timeout) while supervisor_task is
-   * disabled. Move this back to supervisor_task once it's re-enabled. */
+  typedef struct {
+      int16_t      I_cA;       /* I_rect_cmd_cA target at end of this phase */
+      vesc_mode_t  mode;       /* mode held during the phase */
+      uint32_t     ms;         /* duration of this phase (linear ramp from prev) */
+  } phase_t;
+
+  /* IDLE→TAKEOFF→CLIMB→CRUISE→LAND→IDLE, then loops. Edit numbers freely. */
+  static const phase_t profile[] = {
+      {    0, VESC_MODE_IDLE,     5000 },   /*  0..5  s  hold idle  */
+      { 5000, VESC_MODE_TAKEOFF,  3000 },   /*  5..8  s  ramp 0  -> 50.00 A */
+      { 5000, VESC_MODE_TAKEOFF,  2000 },   /*  8..10 s  hold 50 A          */
+      { 3500, VESC_MODE_CLIMB,    3000 },   /* 10..13 s  ramp 50 -> 35 A    */
+      { 3500, VESC_MODE_CLIMB,   12000 },   /* 13..25 s  hold 35 A (climb)  */
+      { 2000, VESC_MODE_CRUISE,   5000 },   /* 25..30 s  ramp 35 -> 20 A    */
+      { 2000, VESC_MODE_CRUISE,  25000 },   /* 30..55 s  hold 20 A (cruise) */
+      {  500, VESC_MODE_LAND,     5000 },   /* 55..60 s  ramp 20 -> 5 A     */
+      {  500, VESC_MODE_LAND,     5000 },   /* 60..65 s  hold 5 A (descent) */
+      {    0, VESC_MODE_IDLE,     3000 },   /* 65..68 s  ramp 5 -> 0  A     */
+  };
+  const uint32_t N_PHASES = sizeof(profile) / sizeof(profile[0]);
+  const uint32_t TICK_MS  = 10;             /* 100 Hz update */
+
+  int16_t  prev_I = 0;                      /* setpoint at the start of phase[0] */
+  uint32_t phase  = 0;
+  uint32_t t_in   = 0;                      /* ms elapsed in current phase */
+
   for(;;)
   {
     watchdog_refresh();
-    osDelay(20);
+
+    const phase_t *p = &profile[phase];
+    int16_t I_cmd;
+    if (p->ms == 0u) {
+      I_cmd = p->I_cA;
+    } else {
+      /* linear interpolation prev_I -> p->I_cA over p->ms */
+      int32_t num = (int32_t)(p->I_cA - prev_I) * (int32_t)t_in;
+      I_cmd = (int16_t)((int32_t)prev_I + num / (int32_t)p->ms);
+    }
+    pt_set_setpoint(I_cmd, p->mode);
+
+    osDelay(TICK_MS);
+    t_in += TICK_MS;
+    if (t_in >= p->ms) {
+      prev_I = p->I_cA;
+      t_in   = 0;
+      phase  = (phase + 1u) % N_PHASES;
+    }
   }
   /* USER CODE END StartDefaultTask */
 }

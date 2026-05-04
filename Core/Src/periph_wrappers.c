@@ -6,8 +6,8 @@
 
 static CAN_HandleTypeDef *handle_of(can_bus_t bus) {
     switch (bus) {
-    case CAN_BUS_DRONECAN: return &hcan1;
-    case CAN_BUS_ENGINE:   return &hcan2;
+    case CAN_BUS_AVIONICS:   return &hcan1;
+    case CAN_BUS_POWERTRAIN: return &hcan2;
     default:               return 0;
     }
 }
