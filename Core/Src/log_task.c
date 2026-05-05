@@ -16,7 +16,7 @@ static StackType_t  s_stack[512];    /* 2 KB */
 
 static FATFS    s_fs;
 static FIL      s_file;
-static char     s_line[384];
+static char     s_line[512];
 static char     s_filename[16];
 static bool     s_mounted = false;
 static uint32_t s_writes_since_sync = 0;
@@ -59,13 +59,14 @@ static void log_task(void *arg) {
         for (;;) osDelay(1000);
     }
     f_puts("ms,"
-           "mode,I_cmd_cA,"
+           "mode,ctrl_mode,I_cmd_cA,omega_cmd,duty_cmd,"
            "V_dc_cV,I_dc_cA,gen_rpm,igbt_C,rect_fault,rect_seq,rect_tick,"
            "fc_state,fc_thr_pct,fc_tick,"
            "bms_soc,bms_v_cV,bms_i_cA,bms_C,bms_tick,"
            "ecu_rpm,ecu_fuel_dg_s,ecu_cht_C,ecu_tick,"
            "sup_hb,ct_bat,ct_rect,"
            "faults,"
+           "expt_active,expt_phase,expt_label,"
            "tc1_cdeg,tc2_cdeg,tc3_cdeg,adc0,adc1,adc2,adc3\n", &s_file);
     f_sync(&s_file);
 
@@ -81,18 +82,22 @@ static void log_task(void *arg) {
 
         /* tc temps written as int32 cdeg (×100 °C) to avoid pulling
          * printf-float into the link. Decode by /100 in post-proc. */
+        const char *expt_label = pt.expt_label ? pt.expt_label : "";
+
         int n = snprintf(s_line, sizeof(s_line),
             "%lu,"
-            "%u,%d,"
+            "%u,%u,%d,%ld,%d,"
             "%u,%d,%u,%d,%u,%u,%lu,"
             "%u,%u,%lu,"
             "%u,%u,%d,%d,%lu,"
             "%u,%u,%d,%lu,"
             "%lu,%u,%u,"
             "0x%04X,"
+            "%u,%u,%s,"
             "%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
             (unsigned long)osKernelGetTickCount(),
-            (unsigned)pt.mode, pt.I_rect_cmd_cA,
+            (unsigned)pt.mode, (unsigned)pt.rect_ctrl_mode,
+            pt.I_rect_cmd_cA, (long)pt.omega_e_cmd_erpm, pt.duty_cmd_x10000,
             pt.rect_state.V_dc_cV, pt.rect_state.I_dc_cA,
             pt.rect_state.gen_rpm, pt.rect_state.igbt_temp_C,
             pt.rect_state.fault_bits, pt.rect_state.seq,
@@ -107,6 +112,7 @@ static void log_task(void *arg) {
             (unsigned)pt.contactor_battery_cmd,
             (unsigned)pt.contactor_rectifier_cmd,
             pt.fault_bits,
+            (unsigned)pt.expt_active, (unsigned)pt.expt_phase_idx, expt_label,
             (long)(sd.tc[0].tc_temp * 100.0f),
             (long)(sd.tc[1].tc_temp * 100.0f),
             (long)(sd.tc[2].tc_temp * 100.0f),

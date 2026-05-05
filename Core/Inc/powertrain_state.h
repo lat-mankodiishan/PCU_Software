@@ -68,6 +68,17 @@ typedef struct {
 
     /* Aggregated faults — OR of fault_id_t */
     uint16_t          fault_bits;
+
+    /* Experiment runner state — written by experiment.c, read by supervisor
+     * (gates the I_bat closed-loop) and log_task. expt_label points into
+     * static-const profile data, so it lives as long as the firmware does.
+     * The two _req flags are operator hooks: set from the debugger or via
+     * expt_advance() / expt_abort(). */
+    bool              expt_active;
+    uint8_t           expt_phase_idx;
+    const char       *expt_label;
+    bool              expt_advance_req;
+    bool              expt_abort_req;
 } powertrain_state_t;
 
 

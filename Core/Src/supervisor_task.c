@@ -47,6 +47,8 @@ static void supervisor_task(void *arg) {
         uint16_t     faults;
         int16_t      bms_i_bat_cA;
         uint32_t     bms_tick;
+        bool         expt_active;
+        int16_t      expt_I_cmd_cA;
 
         osMutexAcquire(g_pt_mtx, osWaitForever);
         in.mode             = g_pt.fc_flight_state;
@@ -55,6 +57,8 @@ static void supervisor_task(void *arg) {
         faults              = g_pt.fault_bits;
         bms_i_bat_cA        = g_pt.bms_i_bat_cA;
         bms_tick            = g_pt.bms_input_tick;
+        expt_active         = g_pt.expt_active;
+        expt_I_cmd_cA       = g_pt.I_rect_cmd_cA;
         osMutexRelease(g_pt_mtx);
 
         /* --- Mode-override on faults --------------------------------- */
@@ -70,10 +74,17 @@ static void supervisor_task(void *arg) {
 #endif
         in.mode = final_mode;
 
-        /* --- Run control law ----------------------------------------- */
+        /* --- Run control law ----------------------------------------- *
+         * When an experiment is active, it owns the setpoint. We slave the
+         * I_bat integrator to the experiment's command so resuming the
+         * closed-loop after the experiment ends starts from a consistent
+         * state, and we skip the publish step so we don't overwrite the
+         * experiment's mode. */
         int16_t I_cmd;
 #if USE_IBAT_CONTROL_LAW
-        if (final_mode == VESC_MODE_FAULT) {
+        if (expt_active) {
+            s_ctl_state.I_rect_cmd_cA = expt_I_cmd_cA;
+        } else if (final_mode == VESC_MODE_FAULT) {
             s_ctl_state.I_rect_cmd_cA = 0;          /* reset integrator */
         } else if (bms_tick != last_bms_tick) {
             last_bms_tick = bms_tick;
@@ -84,8 +95,10 @@ static void supervisor_task(void *arg) {
         I_cmd = control_law_step(&s_ctl_state, &in, &s_ctl_params);
 #endif
 
-        /* --- Publish setpoint to rectifier_task ---------------------- */
-        pt_set_setpoint(I_cmd, final_mode);
+        /* --- Publish setpoint to rectifier_task (unless experiment owns it) - */
+        if (!expt_active) {
+            pt_set_setpoint(I_cmd, final_mode);
+        }
 
         /* --- Contactor policy (V1: always close both; fault-driven
          *     opens deferred until BMS / battery fault detection). --- */
