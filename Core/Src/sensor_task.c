@@ -37,9 +37,9 @@ void sensor_task_start(void) {
     s_mtx = osMutexNew(&mattr);
     memset(&s_data, 0, sizeof(s_data));
 
-    /* ADC init runs HAL_Delay during reset; safe pre-kernel because TIM6
-     * (HAL timebase) is already ticking. */
-    ADC_Init(s_ch_cfg, SENSOR_NUM_ADC_CH, ADC_SPS_100, ADC_FILT_SINC4);
+    /* ADC_Init is deferred into the task body — it spins on HAL_Delay and
+     * pre-kernel calls have proven flaky depending on NVIC state. Post-
+     * kernel HAL_Delay is reliable because TIM6's tick IRQ is unmasked. */
 
     static const osThreadAttr_t tattr = {
         .name       = "sensor",
@@ -60,6 +60,13 @@ void sensor_data_get(sensor_data_t *out) {
 
 static void sensor_task(void *arg) {
     (void)arg;
+
+    /* Run ADC bring-up here, post-kernel: ADC_Reset sleeps via HAL_Delay
+     * and that needs TIM6's IRQ active, which is reliable once the
+     * scheduler is running. Other tasks reading sensor_data_get during
+     * this ~110 ms see the zero-initialized s_data — fine for bring-up. */
+    ADC_Init(s_ch_cfg, SENSOR_NUM_ADC_CH, ADC_SPS_100, ADC_FILT_SINC4);
+
     uint32_t next = osKernelGetTickCount();
 
     for (;;) {
@@ -74,14 +81,24 @@ static void sensor_task(void *arg) {
             }
         }
 
-        /* --- 3 thermocouples on hspi2 ----------------------------------- */
+        /* --- 3 thermocouples on hspi2 ----------------------------------- *
+         * MAX_GetData distinguishes three outcomes:
+         *   ok=true              → clean read, publish.
+         *   ok=false, fault=true → genuine open/short fault, publish so
+         *                          consumers see the fault state.
+         *   ok=false, fault=false→ corrupt SPI frame (reserved bits set),
+         *                          hold the last good reading.
+         * tc_valid mirrors ok so consumers can see the latest sample's
+         * trustworthiness. */
         for (uint8_t i = 0; i < SENSOR_NUM_TC; ++i) {
             uint32_t raw;
             MAX_ReadSPI(i, &raw);
             TC_Reading_t r;
             bool ok = MAX_GetData(raw, &r);
             osMutexAcquire(s_mtx, osWaitForever);
-            s_data.tc[i]       = r;
+            if (ok || r.fault) {
+                s_data.tc[i] = r;
+            }
             s_data.tc_valid[i] = ok;
             osMutexRelease(s_mtx);
         }
