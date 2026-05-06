@@ -5,8 +5,8 @@
 #include <stdbool.h>
 
 typedef enum {
-    CAN_BUS_AVIONICS   = 0, /* CAN1 — Pixhawk DroneCAN + Loweheiser ECU @ 500k */
-    CAN_BUS_POWERTRAIN = 1, /* CAN2 — VESC rectifier + Daly BMS @ 250k */
+    CAN_BUS_DRONECAN = 0,   /* CAN1 — PCU<->FC */
+    CAN_BUS_ENGINE   = 1,   /* CAN2 — Rectifier+ECU+Laptop */
     CAN_BUS_COUNT
 } can_bus_t;
 
@@ -44,5 +44,9 @@ void watchdog_refresh(void);
 
 /* Toggle the status LED. Called from the idle hook for a 1 Hz heartbeat. */
 void led_hw_toggle(void);
+
+/* DEBUG: snapshot CAN1's ESR + counters into globals. Cheap (one register
+ * read). Watch g_can1_tec / g_can1_boff / g_can1_epvf in the debugger. */
+void can_hw_diag_snapshot(void);
 
 #endif /* PERIPH_WRAPPERS_H */

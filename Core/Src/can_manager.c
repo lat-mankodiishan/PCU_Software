@@ -3,8 +3,8 @@
 #include "task.h"
 #include "queue.h"
 
-#define TX_QUEUE_DEPTH      16
-#define RX_DISPATCH_DEPTH   32
+#define TX_QUEUE_DEPTH      64
+#define RX_DISPATCH_DEPTH   64
 #define MAX_SUBS_PER_BUS    8
 
 typedef struct {

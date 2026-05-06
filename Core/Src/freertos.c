@@ -175,12 +175,12 @@ void MX_FREERTOS_Init(void) {
   pt_init();
   can_mgr_init();
   rectifier_task_start();
-  supervisor_task_start();
+  // supervisor_task_start();
   // pdb_task_start();
-  sensor_task_start();
-  log_task_start();
-  // fc_link_task_start();
-  bms_task_start();
+  // sensor_task_start();
+  // log_task_start();
+  fc_link_task_start();
+  // bms_task_start();
   // ecu_task_start();
   /* USER CODE END RTOS_THREADS */
 
@@ -200,12 +200,19 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* supervisor_task is now the sole writer of pt_set_setpoint (running
-   * the I_bat closed-loop — see USE_IBAT_CONTROL_LAW in supervisor_task.c)
-   * and the sole watchdog kicker. defaultTask just stays alive. */
+  /* Rectifier-link bring-up: inject a constant setpoint so 0x101 frames carry
+   * something other than zero. supervisor_task is disabled, so nothing else
+   * writes I_rect_cmd_cA / mode. Adjust this single line on the bench to
+   * sweep current; or write g_pt.I_rect_cmd_cA directly via the debugger. */
+  pt_set_bms_inputs(7000);                          /* 70 % SOC (placeholder) */
+  pt_set_setpoint(100, VESC_MODE_CRUISE);           /* 1.00 A constant */
+
+  /* defaultTask kicks the IWDG (~64 ms timeout) while supervisor_task is
+   * disabled. Move this back to supervisor_task once it's re-enabled. */
   for(;;)
   {
-    osDelay(1000);
+    watchdog_refresh();
+    osDelay(20);
   }
   /* USER CODE END StartDefaultTask */
 }

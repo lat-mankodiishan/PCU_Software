@@ -8,11 +8,6 @@
 
 #define SUP_PERIOD_MS       10        /* 100 Hz */
 
-/* Bench bring-up: closed-loop on bms_i_bat_cA to hold battery current at 0,
- * letting the rectifier cover all load. Set to 0 to fall back to the
- * flight-mode law (throttle + flight_state + soc). */
-#define USE_IBAT_CONTROL_LAW   1
-
 static StaticTask_t  s_tcb;
 static StackType_t   s_stack[256];    /* 1 KB */
 
@@ -39,22 +34,17 @@ void supervisor_task_start(void) {
 static void supervisor_task(void *arg) {
     (void)arg;
     uint32_t next = osKernelGetTickCount();
-    uint32_t last_bms_tick = 0;
 
     for (;;) {
         /* --- Snapshot inputs under the mutex ------------------------- */
         ctl_inputs_t in;
         uint16_t     faults;
-        int16_t      bms_i_bat_cA;
-        uint32_t     bms_tick;
 
         osMutexAcquire(g_pt_mtx, osWaitForever);
         in.mode             = g_pt.fc_flight_state;
         in.throttle_dem_pct = g_pt.fc_throttle_dem_pct;
         in.soc_pct          = g_pt.bms_soc_pct;
         faults              = g_pt.fault_bits;
-        bms_i_bat_cA        = g_pt.bms_i_bat_cA;
-        bms_tick            = g_pt.bms_input_tick;
         osMutexRelease(g_pt_mtx);
 
         /* --- Mode-override on faults --------------------------------- */
@@ -62,27 +52,10 @@ static void supervisor_task(void *arg) {
         if (faults & (FAULT_RECT_OFFLINE | FAULT_BUS2_BUSOFF)) {
             final_mode = VESC_MODE_FAULT;
         }
-#if USE_IBAT_CONTROL_LAW
-        /* No BMS reading = no measurement = no closed-loop. */
-        if (faults & FAULT_BMS_STALE) {
-            final_mode = VESC_MODE_FAULT;
-        }
-#endif
         in.mode = final_mode;
 
-        /* --- Run control law ----------------------------------------- */
-        int16_t I_cmd;
-#if USE_IBAT_CONTROL_LAW
-        if (final_mode == VESC_MODE_FAULT) {
-            s_ctl_state.I_rect_cmd_cA = 0;          /* reset integrator */
-        } else if (bms_tick != last_bms_tick) {
-            last_bms_tick = bms_tick;
-            (void)control_law_step_ibat(&s_ctl_state, bms_i_bat_cA, &s_ctl_params);
-        }
-        I_cmd = s_ctl_state.I_rect_cmd_cA;
-#else
-        I_cmd = control_law_step(&s_ctl_state, &in, &s_ctl_params);
-#endif
+        /* --- Run pure control law ------------------------------------ */
+        int16_t I_cmd = control_law_step(&s_ctl_state, &in, &s_ctl_params);
 
         /* --- Publish setpoint to rectifier_task ---------------------- */
         pt_set_setpoint(I_cmd, final_mode);

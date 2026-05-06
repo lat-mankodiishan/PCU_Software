@@ -34,21 +34,6 @@ void MAX_ReadSPI(uint8_t ch, uint32_t *data){
 }
 
 bool MAX_GetData(uint32_t data, TC_Reading_t *reading){
-	/* Bits 17 and 3 are reserved and always 0 in a valid MAX31855 frame.
-	 * Either being set means the SPI read was corrupted (bus glitch, MISO
-	 * float, contention with another chip). Signal corruption with
-	 * ok=false AND fault=false so the caller can tell it apart from a
-	 * genuine open/short fault (which sets fault=true). */
-	if (((data >> 17) & 0x01u) || ((data >> 3) & 0x01u)) {
-		reading->fault     = false;
-		reading->short_vcc = false;
-		reading->short_gnd = false;
-		reading->open_ckt  = false;
-		reading->tc_temp   = 0.0f;
-		reading->cj_temp   = 0.0f;
-		return false;
-	}
-
 	reading->fault = (data >> 16) & 0x01;
 	reading->short_vcc = (data >> 2) & 0x01;
 	reading -> short_gnd = (data >> 1) & 0x01;

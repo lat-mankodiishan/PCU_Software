@@ -5,12 +5,9 @@
 #include "cmsis_os2.h"
 #include "vesc_proto.h"
 
-/* Hardware-of-last-resort clamps on rectifier setpoints. control_law
- * may apply tighter ceilings; these are the absolute walls.
- * Mirror these on the VESC side (hybrid_pcu.c). */
-#define I_RECT_MAX_CA           16000      /* 160.00 A           */
-#define OMEGA_E_MAX_ERPM       100000      /* 100k electrical RPM */
-#define DUTY_MAX_X10000          9500      /* 95.00 % duty       */
+/* Hardware-of-last-resort clamp on rectifier current command.
+ * Tighten in control_law if you want a softer ceiling. */
+#define I_RECT_MAX_CA           16000      /* 160.00 A */
 
 /* Aggregated fault bits — OR'd from all detector tasks.
  * supervisor_task reads this each tick and decides actuator state. */
@@ -27,12 +24,8 @@ typedef enum {
 } fault_id_t;
 
 typedef struct {
-    /* Setpoint — supervisor → rectifier_task (5 ms)
-     * rect_ctrl_mode picks which one of the three is on the wire. */
-    rect_ctrl_mode_t  rect_ctrl_mode;
-    int16_t           I_rect_cmd_cA;       /* 0.01 A LSB,  for RECT_CTRL_CURRENT */
-    int32_t           omega_e_cmd_erpm;    /* 1 eRPM LSB,  for RECT_CTRL_OMEGA   */
-    int16_t           duty_cmd_x10000;     /* 0.01 % LSB,  for RECT_CTRL_DUTY    */
+    /* Setpoint — supervisor → rectifier_task (5 ms) */
+    int16_t           I_rect_cmd_cA;
     vesc_mode_t       mode;
 
     /* Telemetry — rectifier_task → readers */
@@ -77,13 +70,8 @@ extern osMutexId_t        g_pt_mtx;
 /* Call once before osKernelStart. */
 void     pt_init(void);
 
-/* Setpoint write helpers — called by supervisor / bench stubs.
- * Each setter atomically sets the value AND switches rect_ctrl_mode to
- * the matching control type, so rectifier_task always TXes the frame
- * that corresponds to the most recent setter call. */
-void     pt_set_setpoint      (int16_t I_rect_cmd_cA,    vesc_mode_t mode);
-void     pt_set_setpoint_omega(int32_t omega_e_cmd_erpm, vesc_mode_t mode);
-void     pt_set_setpoint_duty (int16_t duty_cmd_x10000,  vesc_mode_t mode);
+/* Setpoint write helper — called by supervisor / bench stubs. */
+void     pt_set_setpoint(int16_t I_rect_cmd_cA, vesc_mode_t mode);
 
 void     pt_set_fault(uint16_t mask);
 void     pt_clear_fault(uint16_t mask);

@@ -23,9 +23,6 @@ static void rectifier_task(void *arg);
 static inline int16_t clamp_i16(int16_t v, int16_t lo, int16_t hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
-static inline int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi) {
-    return v < lo ? lo : (v > hi ? hi : v);
-}
 
 void rectifier_task_start(void) {
     static const osMessageQueueAttr_t qattr = {
@@ -39,7 +36,7 @@ void rectifier_task_start(void) {
                                sizeof(can_frame_t),
                                &qattr);
 
-    can_mgr_subscribe(CAN_BUS_POWERTRAIN,
+    can_mgr_subscribe(CAN_BUS_ENGINE,
                       VESC_ID_GET_RECT_STATE_CONCISE,
                       0x7FFu,                    /* exact-match 11-bit */
                       false,
@@ -75,47 +72,18 @@ static void rectifier_task(void *arg) {
             pt_clear_fault(FAULT_RECT_STALE);
         }
 
-        /* --- TX setpoint snapshot, hardware-of-last-resort clamp ------
-         * Pick the frame to encode based on rect_ctrl_mode. The PCU emits
-         * exactly one of {0x101, 0x102, 0x103} per tick — VESC last-write-
-         * wins, but at 200 Hz only one is being written. */
-        rect_ctrl_mode_t mode_now;
-        int16_t   I_cA_now;
-        int32_t   omega_now;
-        int16_t   duty_now;
-        vesc_mode_t pt_mode;
+        /* --- TX setpoint snapshot, hardware-of-last-resort clamp ------ */
+        vesc_curr_dem_t cmd;
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        mode_now  = g_pt.rect_ctrl_mode;
-        I_cA_now  = clamp_i16(g_pt.I_rect_cmd_cA,    -I_RECT_MAX_CA,   I_RECT_MAX_CA);
-        omega_now = clamp_i32(g_pt.omega_e_cmd_erpm, -OMEGA_E_MAX_ERPM, OMEGA_E_MAX_ERPM);
-        duty_now  = clamp_i16(g_pt.duty_cmd_x10000,  -DUTY_MAX_X10000,  DUTY_MAX_X10000);
-        pt_mode   = g_pt.mode;
+        cmd.I_rect_cmd_cA = clamp_i16(g_pt.I_rect_cmd_cA,
+                                      -I_RECT_MAX_CA, I_RECT_MAX_CA);
+        cmd.mode          = g_pt.mode;
         osMutexRelease(g_pt_mtx);
+        cmd.seq = seq++;
 
-        const uint8_t seq_now = seq++;
         can_frame_t tx;
-        switch (mode_now) {
-        case RECT_CTRL_OMEGA: {
-            vesc_omega_dem_t cmd = { .omega_e_cmd_erpm = omega_now,
-                                     .mode = pt_mode, .seq = seq_now };
-            vesc_proto_encode_omega_dem(&cmd, &tx);
-            break;
-        }
-        case RECT_CTRL_DUTY: {
-            vesc_duty_dem_t cmd = { .duty_cmd_x10000 = duty_now,
-                                    .mode = pt_mode, .seq = seq_now };
-            vesc_proto_encode_duty_dem(&cmd, &tx);
-            break;
-        }
-        case RECT_CTRL_CURRENT:
-        default: {
-            vesc_curr_dem_t cmd = { .I_rect_cmd_cA = I_cA_now,
-                                    .mode = pt_mode, .seq = seq_now };
-            vesc_proto_encode_curr_dem(&cmd, &tx);
-            break;
-        }
-        }
-        (void)can_mgr_send(CAN_BUS_POWERTRAIN, &tx, 0);
+        vesc_proto_encode_curr_dem(&cmd, &tx);
+        (void)can_mgr_send(CAN_BUS_ENGINE, &tx, 0);
 
         /* --- Staleness check ------------------------------------------ */
         osMutexAcquire(g_pt_mtx, osWaitForever);

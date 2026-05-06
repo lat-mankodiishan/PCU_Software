@@ -1,6 +1,4 @@
 #include "control_law.h"
-#include "powertrain_state.h"   /* I_RECT_MAX_CA */
-#include <stdint.h>
 
 void control_law_init(ctl_state_t *st) {
     st->throttle_filt_pct = 0;
@@ -15,9 +13,6 @@ void control_law_default_params(ctl_params_t *p) {
     p->soc_low_threshold_pct =  3000;    /* 30 % */
     p->soc_bias_cA           =  2000;    /* +20.00 A while SOC < threshold */
     p->throttle_alpha_q15    =  2000;    /* ~6 %/tick → ~1 Hz cutoff at 10 ms */
-
-    p->ibat_kp_q15           =  6553;    /* ~0.2 in Q15: 1 A error → 0.2 A adj */
-    p->ibat_deadband_cA      =    30;    /* ±0.3 A; ~3× Daly current LSB */
 }
 
 static inline int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi) {
@@ -80,31 +75,5 @@ int16_t control_law_step(ctl_state_t *st,
 
     out_cA = clamp_i32(out_cA, INT16_MIN, INT16_MAX);
     st->I_rect_cmd_cA = (int16_t)out_cA;
-    return st->I_rect_cmd_cA;
-}
-
-int16_t control_law_step_ibat(ctl_state_t *st,
-                              int16_t i_bat_cA,
-                              const ctl_params_t *p) {
-    /* Sign convention: bms_i_bat_cA is +discharge. When the battery is
-     * discharging we raise the rectifier command so the rectifier covers
-     * the load; when charging (i_bat<0) we back the command down. The
-     * adjustment direction therefore matches the sign of i_bat directly. */
-
-    int32_t i_abs = i_bat_cA < 0 ? -(int32_t)i_bat_cA : (int32_t)i_bat_cA;
-    if (i_abs < (int32_t)p->ibat_deadband_cA) {
-        return st->I_rect_cmd_cA;
-    }
-
-    int32_t adj = ((int32_t)i_bat_cA * (int32_t)p->ibat_kp_q15) >> 15;
-
-    int32_t slew = (int32_t)p->trim_step_cA;
-    if (adj >  slew) adj =  slew;
-    if (adj < -slew) adj = -slew;
-
-    int32_t cmd = (int32_t)st->I_rect_cmd_cA + adj;
-    cmd = clamp_i32(cmd, 0, I_RECT_MAX_CA);
-
-    st->I_rect_cmd_cA = (int16_t)cmd;
     return st->I_rect_cmd_cA;
 }

@@ -23,25 +23,8 @@ void pt_init(void) {
 
 void pt_set_setpoint(int16_t I_rect_cmd_cA, vesc_mode_t mode) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.rect_ctrl_mode = RECT_CTRL_CURRENT;
-    g_pt.I_rect_cmd_cA  = I_rect_cmd_cA;
-    g_pt.mode           = mode;
-    osMutexRelease(g_pt_mtx);
-}
-
-void pt_set_setpoint_omega(int32_t omega_e_cmd_erpm, vesc_mode_t mode) {
-    osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.rect_ctrl_mode    = RECT_CTRL_OMEGA;
-    g_pt.omega_e_cmd_erpm  = omega_e_cmd_erpm;
-    g_pt.mode              = mode;
-    osMutexRelease(g_pt_mtx);
-}
-
-void pt_set_setpoint_duty(int16_t duty_cmd_x10000, vesc_mode_t mode) {
-    osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.rect_ctrl_mode    = RECT_CTRL_DUTY;
-    g_pt.duty_cmd_x10000   = duty_cmd_x10000;
-    g_pt.mode              = mode;
+    g_pt.I_rect_cmd_cA = I_rect_cmd_cA;
+    g_pt.mode          = mode;
     osMutexRelease(g_pt_mtx);
 }
 

@@ -22,25 +22,61 @@
 #if __has_include("canard.h") && __has_include("dsdl.lat.powertrain.PTConcise.h")
 
 #include "can_manager.h"
+#include "periph_wrappers.h"
 #include "powertrain_state.h"
 #include "sensor_task.h"
 #include "canard.h"
 #include "dsdl.lat.powertrain.PTConcise.h"
 #include "dsdl.lat.powertrain.ThrottleDemand.h"
 #include "uavcan.protocol.NodeStatus.h"
+#include "uavcan.protocol.GetNodeInfo_req.h"
+#include "uavcan.protocol.GetNodeInfo_res.h"
+#include "uavcan.equipment.power.BatteryInfo.h"
+#include "uavcan.equipment.esc.RawCommand.h"
+#include "uavcan.equipment.ice.reciprocating.Status.h"
+#include "uavcan.equipment.ice.FuelTankStatus.h"
+#include "uavcan.protocol.param.GetSet_req.h"
+#include "uavcan.protocol.param.GetSet_res.h"
+#include "uavcan.protocol.param.Value.h"
+#include "uavcan.protocol.param.NumericValue.h"
+#include "uavcan.protocol.param.Empty.h"
 
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <string.h>
+#include <math.h>
 
 #define FC_LINK_PERIOD_MS         50            /* 20 Hz tick */
 #define FC_LINK_HEARTBEAT_MS    1000            /* 1 Hz NodeStatus */
-#define FC_LINK_PT_PERIOD_MS      50            /* 20 Hz PTConcise */
+#define FC_LINK_PT_PERIOD_MS      50            /* 20 Hz PTConcise (custom DSDL) */
+#define FC_LINK_BATT_PERIOD_MS   100            /* 10 Hz BatteryInfo  (parsed by ArduPilot) */
+#define FC_LINK_ICE_PERIOD_MS    100            /* 10 Hz ICE Status   (parsed by ArduPilot → EFI_STATUS MAVLink) */
+#define FC_LINK_FUEL_PERIOD_MS  1000            /*  1 Hz FuelTank      (parsed by ArduPilot) */
 #define FC_LINK_FC_STALE_MS     1000            /* declare FC lost */
 
-#define FC_LINK_RX_QUEUE_DEPTH    32
-#define FC_LINK_MEM_POOL_BYTES  2048
+#define FC_LINK_RX_QUEUE_DEPTH    64
+#define FC_LINK_MEM_POOL_BYTES  8192
+
+/* Node identity surfaced via uavcan.protocol.GetNodeInfo. Bump SW major/minor
+ * on protocol-visible changes; HW major/minor track the PCU board revision. */
+#define FC_LINK_SW_VERSION_MAJOR   1
+#define FC_LINK_SW_VERSION_MINOR   0
+#define FC_LINK_HW_VERSION_MAJOR   1
+#define FC_LINK_HW_VERSION_MINOR   0
+#define FC_LINK_NODE_NAME          "lat.pcu"
+
+/* STM32F4 96-bit factory unique ID — first 12 bytes of the 16-byte
+ * uavcan unique_id field; remaining 4 are zero. */
+#define STM32_UID_BASE             0x1FFF7A10UL
+
+/* ArduPilot's native throttle command on DroneCAN is uavcan.equipment.esc.
+ * RawCommand: an int14 array indexed by ESC channel. Set CAN_D1_UC_ESC_BM
+ * on the autopilot to publish — bit N enables ESC channel N+1 (so BM=1
+ * publishes channel 1 → cmd[0]). Match FC_LINK_ESC_INDEX to whichever
+ * channel feeds the engine. */
+#define FC_LINK_ESC_INDEX          0u
+#define FC_LINK_ESC_RAW_MAX        8191    /* int14 forward full-scale */
 
 static StaticTask_t       s_tcb;
 static StackType_t        s_stack[512];          /* 2 KB */
@@ -54,8 +90,43 @@ static CanardInstance     s_canard;
 
 static uint8_t            s_tid_pt     = 0;
 static uint8_t            s_tid_status = 0;
+static uint8_t            s_tid_batt   = 0;
+static uint8_t            s_tid_ice    = 0;
+static uint8_t            s_tid_fuel   = 0;
 
 static volatile uint32_t  s_fc_last_status_tick = 0;     /* 0 = never */
+static uint32_t           s_boot_tick           = 0;     /* set in _start() */
+
+/* DEBUG: per-DTID receive counters. Watch in VS Code "Live Expressions" to
+ * verify the libcanard RX path is delivering complete transfers. Removes
+ * once CAN bring-up is done. */
+volatile uint32_t g_fc_link_rx_nodestatus  = 0;
+volatile uint32_t g_fc_link_rx_throttle    = 0;
+volatile uint32_t g_fc_link_rx_rawcommand  = 0;
+volatile uint32_t g_fc_link_rx_total       = 0;
+
+/* GCS-settable flight-state parameter. Exposed via uavcan.protocol.param.GetSet
+ * service at index 0 / name "flight_state". Defaults to IDLE; user toggles
+ * via Mission Planner DroneCAN GUI -> right-click PCU node -> Configure
+ * parameters. Also written into pt.fc_flight_state via pt_set_fc_inputs so
+ * the supervisor / rectifier_task sees it. */
+volatile int8_t g_pcu_param_flight_state = (int8_t)VESC_MODE_IDLE;
+
+/* DEBUG: counters that fire ONLY when the GetSet service path is touched —
+ * watch in Live Expressions to localize where a request gets dropped. */
+volatile uint32_t g_pcu_should_accept_param = 0;   /* should_accept saw GetSet req */
+volatile uint32_t g_pcu_param_handler_calls = 0;   /* handle_param_get_set entered */
+volatile uint32_t g_pcu_param_set_count    = 0;    /* SET (not GET) variant served */
+volatile uint32_t g_pcu_param_resp_rc      = 0;    /* canardRequestOrRespond return */
+
+/* DEBUG: per-publication counters + last canardBroadcast return code. */
+volatile uint32_t g_pub_ice_calls          = 0;
+volatile  int32_t g_pub_ice_last_rc        = 0;
+volatile uint32_t g_pub_ice_encoded_bytes  = 0;
+volatile uint32_t g_pub_fuel_calls         = 0;
+volatile  int32_t g_pub_fuel_last_rc       = 0;
+volatile uint32_t g_pub_batt_calls         = 0;
+volatile  int32_t g_pub_batt_last_rc       = 0;
 
 /* --- libcanard callbacks ------------------------------------------------ */
 
@@ -65,25 +136,177 @@ static bool should_accept(const CanardInstance *ins,
                           CanardTransferType     transfer_type,
                           uint8_t                source_node_id) {
     (void)ins; (void)source_node_id;
-    if (transfer_type != CanardTransferTypeBroadcast) return false;
 
-    if (data_type_id == DSDL_LAT_POWERTRAIN_THROTTLEDEMAND_ID) {
-        *out_signature = DSDL_LAT_POWERTRAIN_THROTTLEDEMAND_SIGNATURE;
-        return true;
+    if (transfer_type == CanardTransferTypeBroadcast) {
+        if (data_type_id == DSDL_LAT_POWERTRAIN_THROTTLEDEMAND_ID) {
+            *out_signature = DSDL_LAT_POWERTRAIN_THROTTLEDEMAND_SIGNATURE;
+            return true;
+        }
+        if (data_type_id == UAVCAN_EQUIPMENT_ESC_RAWCOMMAND_ID) {
+            *out_signature = UAVCAN_EQUIPMENT_ESC_RAWCOMMAND_SIGNATURE;
+            return true;
+        }
+        if (data_type_id == UAVCAN_PROTOCOL_NODESTATUS_ID) {
+            *out_signature = UAVCAN_PROTOCOL_NODESTATUS_SIGNATURE;
+            return true;
+        }
+        return false;
     }
-    if (data_type_id == UAVCAN_PROTOCOL_NODESTATUS_ID) {
-        *out_signature = UAVCAN_PROTOCOL_NODESTATUS_SIGNATURE;
-        return true;
+
+    if (transfer_type == CanardTransferTypeRequest) {
+        if (data_type_id == UAVCAN_PROTOCOL_GETNODEINFO_REQUEST_ID) {
+            *out_signature = UAVCAN_PROTOCOL_GETNODEINFO_REQUEST_SIGNATURE;
+            return true;
+        }
+        if (data_type_id == UAVCAN_PROTOCOL_PARAM_GETSET_REQUEST_ID) {
+            g_pcu_should_accept_param++;
+            *out_signature = UAVCAN_PROTOCOL_PARAM_GETSET_REQUEST_SIGNATURE;
+            return true;
+        }
     }
     return false;
+}
+
+static void handle_get_node_info(const CanardRxTransfer *req) {
+    struct uavcan_protocol_GetNodeInfoResponse rsp;
+    memset(&rsp, 0, sizeof(rsp));
+
+    rsp.status.uptime_sec                  = (osKernelGetTickCount() - s_boot_tick) / 1000u;
+    rsp.status.health                      = UAVCAN_PROTOCOL_NODESTATUS_HEALTH_OK;
+    rsp.status.mode                        = UAVCAN_PROTOCOL_NODESTATUS_MODE_OPERATIONAL;
+    rsp.status.sub_mode                    = 0;
+    rsp.status.vendor_specific_status_code = pt_get_faults();
+
+    rsp.software_version.major                = FC_LINK_SW_VERSION_MAJOR;
+    rsp.software_version.minor                = FC_LINK_SW_VERSION_MINOR;
+    rsp.software_version.optional_field_flags = 0;
+    rsp.software_version.vcs_commit           = 0;
+    rsp.software_version.image_crc            = 0;
+
+    rsp.hardware_version.major = FC_LINK_HW_VERSION_MAJOR;
+    rsp.hardware_version.minor = FC_LINK_HW_VERSION_MINOR;
+    memcpy(rsp.hardware_version.unique_id,
+           (const void *)STM32_UID_BASE, 12);
+    rsp.hardware_version.certificate_of_authenticity.len = 0;
+
+    rsp.name.len = (uint8_t)(sizeof(FC_LINK_NODE_NAME) - 1);
+    memcpy(rsp.name.data, FC_LINK_NODE_NAME, rsp.name.len);
+
+    uint8_t buf[UAVCAN_PROTOCOL_GETNODEINFO_RESPONSE_MAX_SIZE];
+    uint16_t len = (uint16_t)uavcan_protocol_GetNodeInfoResponse_encode(&rsp, buf);
+
+    /* Service responses reuse the request's transfer ID — libcanard takes
+     * a pointer but won't increment it for CanardResponse. */
+    uint8_t tid = req->transfer_id;
+    canardRequestOrRespond(&s_canard,
+                           req->source_node_id,
+                           UAVCAN_PROTOCOL_GETNODEINFO_REQUEST_SIGNATURE,
+                           UAVCAN_PROTOCOL_GETNODEINFO_REQUEST_ID,
+                           &tid,
+                           CANARD_TRANSFER_PRIORITY_MEDIUM,
+                           CanardResponse,
+                           buf, len);
+}
+
+/* uavcan.protocol.param.GetSet — exposes our settable parameter table to the
+ * GCS. Mission Planner / DroneCAN GUI Tool query parameters by index starting
+ * from 0; we respond with our parameter at index 0 and an empty response for
+ * any higher index, which signals the GCS to stop iterating.
+ *
+ * Currently exposed:
+ *   index 0 : flight_state  int8 [0..VESC_MODE_FAULT]
+ */
+#define FC_LINK_PARAM_FLIGHT_STATE_NAME      "flight_state"
+#define FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN  (sizeof(FC_LINK_PARAM_FLIGHT_STATE_NAME) - 1)
+
+static void handle_param_get_set(const CanardRxTransfer *req) {
+    g_pcu_param_handler_calls++;
+    struct uavcan_protocol_param_GetSetRequest greq;
+    memset(&greq, 0, sizeof(greq));
+    if (uavcan_protocol_param_GetSetRequest_decode(req, &greq)) {
+        return;   /* malformed request */
+    }
+
+    struct uavcan_protocol_param_GetSetResponse rsp;
+    memset(&rsp, 0, sizeof(rsp));
+
+    /* Match either by explicit name (preferred — survives reordering) or by
+     * index when name is empty. */
+    bool by_name = (greq.name.len == FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN) &&
+                   (memcmp(greq.name.data,
+                           FC_LINK_PARAM_FLIGHT_STATE_NAME,
+                           FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN) == 0);
+    bool by_index = (greq.name.len == 0) && (greq.index == 0);
+
+    if (by_name || by_index) {
+        /* SET request: value tag != EMPTY. We accept INTEGER. */
+        if (greq.value.union_tag == UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE) {
+            int64_t v = greq.value.integer_value;
+            if (v < 0)                    v = 0;
+            if (v > (int64_t)VESC_MODE_FAULT) v = (int64_t)VESC_MODE_FAULT;
+            g_pcu_param_flight_state = (int8_t)v;
+            g_pcu_param_set_count++;
+        }
+
+        /* Response carries the CURRENT value (post-set) and the canonical
+         * name. default/min/max are left EMPTY to keep the multi-frame
+         * transfer short — fewer frames = less bus airtime = lower chance
+         * of GCS-side timeout when the bus is busy with autopilot traffic. */
+        rsp.value.union_tag         = UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE;
+        rsp.value.integer_value     = g_pcu_param_flight_state;
+        rsp.default_value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_EMPTY;
+        rsp.max_value.union_tag     = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_EMPTY;
+        rsp.min_value.union_tag     = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_EMPTY;
+        rsp.name.len = FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN;
+        memcpy(rsp.name.data,
+               FC_LINK_PARAM_FLIGHT_STATE_NAME,
+               FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN);
+    } else {
+        /* No such parameter — empty response signals end of list to the GCS. */
+        rsp.value.union_tag         = UAVCAN_PROTOCOL_PARAM_VALUE_EMPTY;
+        rsp.default_value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_EMPTY;
+        rsp.max_value.union_tag     = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_EMPTY;
+        rsp.min_value.union_tag     = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_EMPTY;
+        rsp.name.len                = 0;
+    }
+
+    uint8_t  buf[UAVCAN_PROTOCOL_PARAM_GETSET_RESPONSE_MAX_SIZE];
+    uint16_t len = (uint16_t)uavcan_protocol_param_GetSetResponse_encode(&rsp, buf);
+
+    uint8_t tid = req->transfer_id;
+    /* HIGH priority so the response wins arbitration against autopilot's
+     * RawCommand traffic before the GCS-side timeout fires. */
+    g_pcu_param_resp_rc = (uint32_t)canardRequestOrRespond(&s_canard,
+                           req->source_node_id,
+                           UAVCAN_PROTOCOL_PARAM_GETSET_REQUEST_SIGNATURE,
+                           UAVCAN_PROTOCOL_PARAM_GETSET_REQUEST_ID,
+                           &tid,
+                           CANARD_TRANSFER_PRIORITY_HIGH,
+                           CanardResponse,
+                           buf, len);
 }
 
 static void on_transfer_received(CanardInstance    *ins,
                                  CanardRxTransfer  *transfer) {
     (void)ins;
+
+    g_fc_link_rx_total++;          /* DEBUG: every accepted transfer */
+
+    if (transfer->transfer_type == CanardTransferTypeRequest) {
+        if (transfer->data_type_id == UAVCAN_PROTOCOL_GETNODEINFO_REQUEST_ID) {
+            handle_get_node_info(transfer);
+            return;
+        }
+        if (transfer->data_type_id == UAVCAN_PROTOCOL_PARAM_GETSET_REQUEST_ID) {
+            handle_param_get_set(transfer);
+            return;
+        }
+    }
+
     if (transfer->transfer_type != CanardTransferTypeBroadcast) return;
 
     if (transfer->data_type_id == DSDL_LAT_POWERTRAIN_THROTTLEDEMAND_ID) {
+        g_fc_link_rx_throttle++;
         struct dsdl_lat_powertrain_ThrottleDemand msg;
         /* dronecan_dsdlc decoder returns false on success. */
         if (!dsdl_lat_powertrain_ThrottleDemand_decode(transfer, &msg)) {
@@ -94,7 +317,30 @@ static void on_transfer_received(CanardInstance    *ins,
             pt_set_fc_inputs(mode, thr);
         }
     }
+    else if (transfer->data_type_id == UAVCAN_EQUIPMENT_ESC_RAWCOMMAND_ID) {
+        g_fc_link_rx_rawcommand++;
+        struct uavcan_equipment_esc_RawCommand msg;
+        if (!uavcan_equipment_esc_RawCommand_decode(transfer, &msg)) {
+            if (msg.cmd.len > FC_LINK_ESC_INDEX) {
+                int16_t raw = msg.cmd.data[FC_LINK_ESC_INDEX];
+                /* Reverse / negative throttle is meaningless for the
+                 * generator — clamp to forward range only. */
+                if (raw < 0)                    raw = 0;
+                if (raw > FC_LINK_ESC_RAW_MAX)  raw = FC_LINK_ESC_RAW_MAX;
+                /* Scale int14 0..8191 → 0..10000 (0.01 % LSB). */
+                uint16_t thr = (uint16_t)(((uint32_t)raw * 10000u)
+                                          / FC_LINK_ESC_RAW_MAX);
+                /* Flight state is now driven by the GCS-settable parameter
+                 * (uavcan.protocol.param.GetSet on this node), NOT inferred
+                 * from throttle. Stock ArduPilot has no DroneCAN flight-phase
+                 * channel, so the operator sets it explicitly via MP. */
+                vesc_mode_t mode = (vesc_mode_t)g_pcu_param_flight_state;
+                pt_set_fc_inputs(mode, thr);
+            }
+        }
+    }
     else if (transfer->data_type_id == UAVCAN_PROTOCOL_NODESTATUS_ID) {
+        g_fc_link_rx_nodestatus++;
         s_fc_last_status_tick = osKernelGetTickCount();
         pt_clear_fault(FAULT_FC_STALE);
     }
@@ -129,13 +375,150 @@ static void publish_pt_concise(void) {
                     buf, (uint16_t)len);
 }
 
+/* Standard uavcan.equipment.power.BatteryInfo — gives Mission Planner /
+ * QGC their battery widget for free, without custom DSDL on the GCS side.
+ * Sourced from the same pt snapshot PTConcise reads; i_bat is a placeholder
+ * (0) until the BMS task lands. */
+static void publish_battery_info(void) {
+    powertrain_state_t pt;
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    pt = g_pt;
+    osMutexRelease(g_pt_mtx);
+
+    struct uavcan_equipment_power_BatteryInfo msg;
+    memset(&msg, 0, sizeof(msg));
+
+    msg.voltage             = pt.rect_state.V_dc_cV / 100.0f;
+    msg.current             = 0.0f;                     /* TODO: BMS feed */
+    msg.temperature         = 0.0f;                     /* unknown */
+    msg.state_of_charge_pct = (uint8_t)(pt.bms_soc_pct / 100u);
+    msg.state_of_health_pct = 100;                      /* unknown — assume good */
+    msg.battery_id          = 0;
+    msg.model_instance_id   = 0;
+    msg.status_flags        = UAVCAN_EQUIPMENT_POWER_BATTERYINFO_STATUS_FLAG_IN_USE;
+
+    uint8_t buf[UAVCAN_EQUIPMENT_POWER_BATTERYINFO_MAX_SIZE];
+    uint32_t len = uavcan_equipment_power_BatteryInfo_encode(&msg, buf);
+
+    g_pub_batt_calls++;
+    g_pub_batt_last_rc = canardBroadcast(&s_canard,
+                    UAVCAN_EQUIPMENT_POWER_BATTERYINFO_SIGNATURE,
+                    UAVCAN_EQUIPMENT_POWER_BATTERYINFO_ID,
+                    &s_tid_batt,
+                    CANARD_TRANSFER_PRIORITY_MEDIUM,
+                    buf, (uint16_t)len);
+}
+
+/* Standard uavcan.equipment.ice.reciprocating.Status — ArduPilot's DroneCAN
+ * driver consumes this and re-emits it on MAVLink as EFI_STATUS, which MP
+ * shows on its EFI / engine telemetry pages without any GCS-side custom
+ * setup. Sourced from the ECU fields of the powertrain snapshot. */
+static void publish_ice_status(void) {
+    powertrain_state_t pt;
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    pt = g_pt;
+    osMutexRelease(g_pt_mtx);
+
+    struct uavcan_equipment_ice_reciprocating_Status msg;
+    memset(&msg, 0, sizeof(msg));
+
+    /* DEBUG / MOCK: ECU isn't wired up yet, so synthesize plausible engine
+     * telemetry that varies with the throttle command coming back from
+     * the Pixhawk. This lets us confirm the EFI_STATUS pipe end-to-end
+     * just by moving the throttle stick. Replace with the real ECU feed
+     * (pt.ecu_rpm, pt.ecu_cht_C, pt.ecu_fuel_rate_dg_s) once that task
+     * is online. */
+    uint16_t load = pt.fc_throttle_dem_pct / 100u;          /* 0..100 % */
+    if (load > 100u) load = 100u;
+
+    /* Idle 1000 RPM at zero throttle, ramp linearly to 6000 RPM at full.
+     * Add a slow sawtooth (uptime % 60) so values move even without
+     * throttle input — easier to see "live" in MP. */
+    uint32_t up_s     = (osKernelGetTickCount() - s_boot_tick) / 1000u;
+    uint32_t mock_rpm = 1000u + ((uint32_t)load * 50u) + (up_s % 60u) * 10u;
+    /* CHT warms with load + uptime: 60..110 °C. */
+    float    mock_cht_C = 60.0f + ((float)load * 0.5f) + (float)(up_s % 30u);
+
+    /* Always RUNNING in mock mode — ArduPilot's EFI driver may suppress
+     * EFI_STATUS field updates if the message reports STOPPED. */
+    msg.state = UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_STATE_RUNNING;
+    msg.flags = UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_FLAG_TEMPERATURE_SUPPORTED;
+
+    msg.engine_load_percent = (uint8_t)load;
+    msg.engine_speed_rpm    = mock_rpm;
+    /* DroneCAN coolant_temperature is in kelvin. */
+    msg.coolant_temperature = mock_cht_C + 273.15f;
+
+    /* Fields we don't measure -> NaN so the GCS marks them "unknown". */
+    msg.intake_manifold_temperature  = NAN;
+    msg.atmospheric_pressure_kpa     = NAN;
+    msg.intake_manifold_pressure_kpa = NAN;
+    msg.spark_dwell_time_ms          = NAN;
+
+    uint8_t  buf[UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_MAX_SIZE];
+    uint32_t len = uavcan_equipment_ice_reciprocating_Status_encode(&msg, buf);
+
+    g_pub_ice_calls++;
+    g_pub_ice_encoded_bytes = len;
+    g_pub_ice_last_rc = canardBroadcast(&s_canard,
+                    UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_SIGNATURE,
+                    UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_ID,
+                    &s_tid_ice,
+                    CANARD_TRANSFER_PRIORITY_MEDIUM,
+                    buf, (uint16_t)len);
+}
+
+/* Standard uavcan.equipment.ice.FuelTankStatus — ArduPilot consumes this as
+ * fuel telemetry. We don't have a tank-level sender yet, so percent is left
+ * 0 / NAN; the only live field is consumption rate, derived from the ECU's
+ * mass-flow telemetry assuming gasoline density 0.74 g/cm³. */
+static void publish_fuel_tank_status(void) {
+    powertrain_state_t pt;
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    pt = g_pt;
+    osMutexRelease(g_pt_mtx);
+
+    struct uavcan_equipment_ice_FuelTankStatus msg;
+    memset(&msg, 0, sizeof(msg));
+
+    /* DEBUG / MOCK: synth a fuel level + flow rate scaled to throttle so
+     * MP shows non-trivial numbers without a tank sender or live ECU.
+     * Replace with real signals once the ECU CAN feed is online. */
+    uint16_t load = pt.fc_throttle_dem_pct / 100u;
+    if (load > 100u) load = 100u;
+    /* Tank fakes a slow drain: 100 % at boot, drops 1 %/min — coarse but visible. */
+    uint32_t up_min = ((osKernelGetTickCount() - s_boot_tick) / 1000u) / 60u;
+    uint32_t pct    = (up_min < 100u) ? (100u - up_min) : 0u;
+    msg.available_fuel_volume_percent = (uint8_t)pct;
+    msg.available_fuel_volume_cm3     = (float)pct * 100.0f;        /* 100 % → 10 L */
+    /* Flow scales linearly with throttle: idle 50, full 500 cm³/min. */
+    msg.fuel_consumption_rate_cm3pm   = 50.0f + (float)load * 4.5f;
+
+    msg.fuel_temperature = NAN;
+    msg.fuel_tank_id     = 0;
+
+    uint8_t  buf[UAVCAN_EQUIPMENT_ICE_FUELTANKSTATUS_MAX_SIZE];
+    uint32_t len = uavcan_equipment_ice_FuelTankStatus_encode(&msg, buf);
+
+    g_pub_fuel_calls++;
+    g_pub_fuel_last_rc = canardBroadcast(&s_canard,
+                    UAVCAN_EQUIPMENT_ICE_FUELTANKSTATUS_SIGNATURE,
+                    UAVCAN_EQUIPMENT_ICE_FUELTANKSTATUS_ID,
+                    &s_tid_fuel,
+                    CANARD_TRANSFER_PRIORITY_MEDIUM,
+                    buf, (uint16_t)len);
+}
+
 static void publish_node_status(uint32_t uptime_sec) {
     struct uavcan_protocol_NodeStatus msg;
     msg.uptime_sec                  = uptime_sec;
     msg.health                      = UAVCAN_PROTOCOL_NODESTATUS_HEALTH_OK;
     msg.mode                        = UAVCAN_PROTOCOL_NODESTATUS_MODE_OPERATIONAL;
     msg.sub_mode                    = 0;
-    msg.vendor_specific_status_code = pt_get_faults();
+    /* DEBUG: surface RawCommand RX count via NodeStatus so it's observable
+     * on any DroneCAN sniffer without needing SWD. Restore to pt_get_faults()
+     * once integration test is done. */
+    msg.vendor_specific_status_code = (uint16_t)g_fc_link_rx_rawcommand;
 
     uint8_t buf[UAVCAN_PROTOCOL_NODESTATUS_MAX_SIZE];
     uint32_t len = uavcan_protocol_NodeStatus_encode(&msg, buf);
@@ -157,7 +540,7 @@ static void drain_canard_tx(void) {
         f.rtr = (frame->id & CANARD_CAN_FRAME_RTR) ? 1 : 0;
         f.dlc = frame->data_len;
         memcpy(f.data, frame->data, frame->data_len);
-        if (can_mgr_send(CAN_BUS_AVIONICS, &f, 0)) {
+        if (can_mgr_send(CAN_BUS_DRONECAN, &f, 0)) {
             canardPopTxQueue(&s_canard);
         } else {
             break;                                    /* HW + SW queue full — retry next tick */
@@ -169,10 +552,12 @@ static void drain_canard_tx(void) {
 
 static void fc_link_task(void *arg) {
     (void)arg;
-    uint32_t boot           = osKernelGetTickCount();
-    uint32_t last_pt_tx     = boot;
-    uint32_t last_status_tx = boot;
-    uint32_t next           = boot;
+    uint32_t last_pt_tx     = s_boot_tick;
+    uint32_t last_batt_tx   = s_boot_tick;
+    uint32_t last_ice_tx    = s_boot_tick;
+    uint32_t last_fuel_tx   = s_boot_tick;
+    uint32_t last_status_tx = s_boot_tick;
+    uint32_t next           = s_boot_tick;
 
     for (;;) {
         uint32_t now = osKernelGetTickCount();
@@ -190,12 +575,30 @@ static void fc_link_task(void *arg) {
             (void)canardHandleRxFrame(&s_canard, &cf, (uint64_t)now * 1000ULL);
         }
 
-        if (now - last_pt_tx >= FC_LINK_PT_PERIOD_MS) {
+        /* DEBUG: silence all high-rate publications while we verify the
+         * GetSet param service end-to-end. Multi-frame TX traffic was
+         * causing libcanard pool exhaustion / TX queue overflow which made
+         * GetSet responses time out. Re-enable selectively after we confirm
+         * the param service works. */
+        (void)last_pt_tx; (void)last_batt_tx; (void)last_ice_tx; (void)last_fuel_tx;
+        if (0 && now - last_pt_tx >= FC_LINK_PT_PERIOD_MS) {
             publish_pt_concise();
             last_pt_tx = now;
         }
+        if (0 && now - last_batt_tx >= FC_LINK_BATT_PERIOD_MS) {
+            publish_battery_info();
+            last_batt_tx = now;
+        }
+        if (0 && now - last_ice_tx >= FC_LINK_ICE_PERIOD_MS) {
+            publish_ice_status();
+            last_ice_tx = now;
+        }
+        if (0 && now - last_fuel_tx >= FC_LINK_FUEL_PERIOD_MS) {
+            publish_fuel_tank_status();
+            last_fuel_tx = now;
+        }
         if (now - last_status_tx >= FC_LINK_HEARTBEAT_MS) {
-            publish_node_status((now - boot) / 1000u);
+            publish_node_status((now - s_boot_tick) / 1000u);
             last_status_tx = now;
         }
 
@@ -206,6 +609,7 @@ static void fc_link_task(void *arg) {
 
         drain_canard_tx();
         canardCleanupStaleTransfers(&s_canard, (uint64_t)now * 1000ULL);
+        can_hw_diag_snapshot();   /* DEBUG: refresh CAN1 ESR/TEC/REC view */
 
         next += FC_LINK_PERIOD_MS;
         osDelayUntil(next);
@@ -213,6 +617,8 @@ static void fc_link_task(void *arg) {
 }
 
 void fc_link_task_start(void) {
+    s_boot_tick = osKernelGetTickCount();
+
     static const osMessageQueueAttr_t qattr = {
         .name    = "fc_rxq",
         .cb_mem  = &s_rxq_cb,
@@ -225,7 +631,7 @@ void fc_link_task_start(void) {
 
     /* Subscribe to ALL extended-frame traffic on CAN1; libcanard's
      * shouldAcceptTransfer filters by DTID. One filter bank consumed. */
-    can_mgr_subscribe(CAN_BUS_AVIONICS, 0u, 0u, true, s_rx_q);
+    can_mgr_subscribe(CAN_BUS_DRONECAN, 0u, 0u, true, s_rx_q);
 
     canardInit(&s_canard, s_mem_pool, sizeof(s_mem_pool),
                on_transfer_received, should_accept, NULL);

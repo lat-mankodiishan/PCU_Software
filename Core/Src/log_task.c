@@ -16,7 +16,7 @@ static StackType_t  s_stack[512];    /* 2 KB */
 
 static FATFS    s_fs;
 static FIL      s_file;
-static char     s_line[384];
+static char     s_line[256];
 static char     s_filename[16];
 static bool     s_mounted = false;
 static uint32_t s_writes_since_sync = 0;
@@ -58,55 +58,37 @@ static void log_task(void *arg) {
     if (f_open(&s_file, s_filename, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
         for (;;) osDelay(1000);
     }
-    f_puts("ms,"
-           "mode,I_cmd_cA,"
-           "V_dc_cV,I_dc_cA,gen_rpm,igbt_C,rect_fault,rect_seq,rect_tick,"
-           "fc_state,fc_thr_pct,fc_tick,"
-           "bms_soc,bms_v_cV,bms_i_cA,bms_C,bms_tick,"
-           "ecu_rpm,ecu_fuel_dg_s,ecu_cht_C,ecu_tick,"
-           "sup_hb,ct_bat,ct_rect,"
-           "faults,"
+    f_puts("ms,mode,I_cmd_cA,V_dc_cV,I_dc_cA,rpm,igbt_C,faults,thr_pct,soc_pct,"
            "tc1_cdeg,tc2_cdeg,tc3_cdeg,adc0,adc1,adc2,adc3\n", &s_file);
     f_sync(&s_file);
 
     uint32_t next = osKernelGetTickCount();
     for (;;) {
+        /* --- Snapshot powertrain state ---------------------------------- */
         powertrain_state_t pt;
         osMutexAcquire(g_pt_mtx, osWaitForever);
         pt = g_pt;
         osMutexRelease(g_pt_mtx);
 
+        /* --- Snapshot sensor data --------------------------------------- */
         sensor_data_t sd;
         sensor_data_get(&sd);
 
-        /* tc temps written as int32 cdeg (×100 °C) to avoid pulling
-         * printf-float into the link. Decode by /100 in post-proc. */
+        /* --- Format CSV row --------------------------------------------- *
+         * Thermocouple temps written as int32 cdeg (×100 °C) to avoid
+         * pulling printf-float into the link. Decode by /100 in post-proc. */
         int n = snprintf(s_line, sizeof(s_line),
-            "%lu,"
-            "%u,%d,"
-            "%u,%d,%u,%d,%u,%u,%lu,"
-            "%u,%u,%lu,"
-            "%u,%u,%d,%d,%lu,"
-            "%u,%u,%d,%lu,"
-            "%lu,%u,%u,"
-            "0x%04X,"
-            "%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
+            "%lu,%u,%d,%u,%d,%u,%d,0x%04X,%u,%u,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
             (unsigned long)osKernelGetTickCount(),
-            (unsigned)pt.mode, pt.I_rect_cmd_cA,
-            pt.rect_state.V_dc_cV, pt.rect_state.I_dc_cA,
-            pt.rect_state.gen_rpm, pt.rect_state.igbt_temp_C,
-            pt.rect_state.fault_bits, pt.rect_state.seq,
-            (unsigned long)pt.rect_state_tick,
-            (unsigned)pt.fc_flight_state, pt.fc_throttle_dem_pct,
-            (unsigned long)pt.fc_input_tick,
-            pt.bms_soc_pct, pt.bms_v_bat_cV, pt.bms_i_bat_cA,
-            pt.bms_max_cell_C, (unsigned long)pt.bms_input_tick,
-            pt.ecu_rpm, pt.ecu_fuel_rate_dg_s, pt.ecu_cht_C,
-            (unsigned long)pt.ecu_input_tick,
-            (unsigned long)pt.supervisor_heartbeat,
-            (unsigned)pt.contactor_battery_cmd,
-            (unsigned)pt.contactor_rectifier_cmd,
+            (unsigned)pt.mode,
+            pt.I_rect_cmd_cA,
+            pt.rect_state.V_dc_cV,
+            pt.rect_state.I_dc_cA,
+            pt.rect_state.gen_rpm,
+            pt.rect_state.igbt_temp_C,
             pt.fault_bits,
+            pt.fc_throttle_dem_pct,
+            pt.bms_soc_pct,
             (long)(sd.tc[0].tc_temp * 100.0f),
             (long)(sd.tc[1].tc_temp * 100.0f),
             (long)(sd.tc[2].tc_temp * 100.0f),
