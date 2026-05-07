@@ -182,7 +182,7 @@ void MX_FREERTOS_Init(void) {
   sensor_task_start();
   log_task_start();
   // fc_link_task_start();
-  bms_task_start();
+  // bms_task_start();    /* Phase 1: no BMS connected — re-enable for Phase 3 */
   // ecu_task_start();
   /* USER CODE END RTOS_THREADS */
 

@@ -10,4 +10,8 @@ extern const expt_profile_t starter_gen_profile;
 /* Automatic w_e ladder for dyno characterization. Pure time-based. */
 extern const expt_profile_t dyno_sweep_profile;
 
+/* Phase-1 bench: single VESC + free-shaft motor. Walks CURRENT/OMEGA/DUTY
+ * at low setpoints. Every phase manual-advance. */
+extern const expt_profile_t phase1_motor_only_profile;
+
 #endif /* EXPERIMENT_PROFILES_H */
