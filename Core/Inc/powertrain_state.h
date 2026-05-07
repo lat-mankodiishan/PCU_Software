@@ -35,6 +35,11 @@ typedef struct {
     int16_t           duty_cmd_x10000;     /* 0.01 % LSB,  for RECT_CTRL_DUTY    */
     vesc_mode_t       mode;
 
+    /* Motor-type command — VESC's mc_motor_type. Drives 0x104 SendMotorTypeCmd
+     * (TXed on change + slow keep-alive). VESC dedups, so writing repeatedly
+     * is harmless. Default = FOC for normal regen operation. */
+    vesc_motor_type_t rect_motor_type;
+
     /* Telemetry — rectifier_task → readers */
     vesc_rect_state_t rect_state;
     uint32_t          rect_state_tick;
@@ -95,6 +100,10 @@ void     pt_init(void);
 void     pt_set_setpoint      (int16_t I_rect_cmd_cA,    vesc_mode_t mode);
 void     pt_set_setpoint_omega(int32_t omega_e_cmd_erpm, vesc_mode_t mode);
 void     pt_set_setpoint_duty (int16_t duty_cmd_x10000,  vesc_mode_t mode);
+
+/* Motor-type command — independent of setpoint. The next 0x104 frame TX
+ * carries this value. Idempotent on the VESC side (dedups before re-init). */
+void     pt_set_motor_type    (vesc_motor_type_t type);
 
 void     pt_set_fault(uint16_t mask);
 void     pt_clear_fault(uint16_t mask);

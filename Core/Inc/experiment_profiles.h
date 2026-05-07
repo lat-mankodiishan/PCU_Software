@@ -14,4 +14,8 @@ extern const expt_profile_t dyno_sweep_profile;
  * at low setpoints. Every phase manual-advance. */
 extern const expt_profile_t phase1_motor_only_profile;
 
+/* BLDC-crank-then-FOC-regen: motor in BLDC at 30 % duty until eRPM passes
+ * 2000 (engine "fired"), then switch to FOC speed control at 3000 eRPM. */
+extern const expt_profile_t crank_to_foc_profile;
+
 #endif /* EXPERIMENT_PROFILES_H */

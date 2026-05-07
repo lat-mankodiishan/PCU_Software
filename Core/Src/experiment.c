@@ -65,6 +65,20 @@ static void publish(rect_ctrl_mode_t mode, int32_t value, vesc_mode_t pt_mode) {
 static void run_phase(const expt_phase_t *p, uint8_t idx) {
     mark_state(true, idx, p->label);
 
+    /* Motor-type change (if requested) must happen BEFORE we start
+     * publishing setpoints, so the VESC has a chance to reconfigure
+     * before the first ramp value lands. The actual reconfig is async
+     * (PCU TX → CAN → VESC RX → set_configuration), so we wait briefly
+     * for the round-trip. PCU TXes 0x104 every 5 ms tick; 50 ms is
+     * comfortably more than the worst-case re-init latency. */
+    switch (p->motor_type) {
+    case EXPT_MOTOR_TYPE_BLDC: pt_set_motor_type(VESC_MOTOR_TYPE_BLDC); osDelay(50); break;
+    case EXPT_MOTOR_TYPE_DC:   pt_set_motor_type(VESC_MOTOR_TYPE_DC);   osDelay(50); break;
+    case EXPT_MOTOR_TYPE_FOC:  pt_set_motor_type(VESC_MOTOR_TYPE_FOC);  osDelay(50); break;
+    case EXPT_MOTOR_TYPE_KEEP:
+    default: break;
+    }
+
     const int32_t prev = prev_setpoint(p->ctrl_mode);
 
     /* Ramp from prev to p->setpoint over p->ramp_ms (or step if 0). */

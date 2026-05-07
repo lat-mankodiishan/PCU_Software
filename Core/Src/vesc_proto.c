@@ -68,6 +68,19 @@ void vesc_proto_encode_duty_dem(const vesc_duty_dem_t *in, can_frame_t *out) {
     out->data[7] = vesc_crc8(out->data, 7);
 }
 
+void vesc_proto_encode_motor_type_cmd(const vesc_motor_type_cmd_t *in, can_frame_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->id  = VESC_ID_SEND_MOTOR_TYPE_CMD;
+    out->ext = 0;
+    out->rtr = 0;
+    out->dlc = 8;
+    out->data[0] = (uint8_t)in->motor_type;
+    out->data[1] = (uint8_t)in->mode;
+    out->data[2] = in->seq;
+    /* bytes 3..6 reserved, already zero */
+    out->data[7] = vesc_crc8(out->data, 7);
+}
+
 vesc_decode_t vesc_proto_decode_rect_state_concise(const can_frame_t *in,
                                                    vesc_rect_state_t *out) {
     if (in->id != VESC_ID_GET_RECT_STATE_CONCISE) return VESC_DECODE_BAD_ID;

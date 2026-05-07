@@ -14,9 +14,21 @@
 #ifndef VESC_ID_SEND_DUTY_DEM
 #define VESC_ID_SEND_DUTY_DEM           0x103u
 #endif
+#ifndef VESC_ID_SEND_MOTOR_TYPE_CMD
+#define VESC_ID_SEND_MOTOR_TYPE_CMD     0x104u
+#endif
 #ifndef VESC_ID_GET_RECT_STATE_CONCISE
 #define VESC_ID_GET_RECT_STATE_CONCISE  0x201u
 #endif
+
+/* Motor type — must mirror VESC's mc_motor_type enum from datatypes.h.
+ * Values are wire-protocol; do not renumber. */
+typedef enum {
+    VESC_MOTOR_TYPE_BLDC = 0,
+    VESC_MOTOR_TYPE_DC   = 1,
+    VESC_MOTOR_TYPE_FOC  = 2,
+    VESC_MOTOR_TYPE_GPD  = 3,
+} vesc_motor_type_t;
 
 /* Powertrain mode — mirrors FC flight state, see control_law. */
 typedef enum {
@@ -55,6 +67,12 @@ typedef struct {
 } vesc_duty_dem_t;
 
 typedef struct {
+    vesc_motor_type_t motor_type;  /* VESC mc_motor_type — BLDC=0, DC=1, FOC=2, GPD=3 */
+    vesc_mode_t       mode;
+    uint8_t           seq;
+} vesc_motor_type_cmd_t;
+
+typedef struct {
     uint16_t V_dc_cV;              /* 0.01 V/LSB, unsigned, 0..655.35 V */
     int16_t  I_dc_cA;              /* 0.01 A/LSB, signed */
     uint16_t gen_rpm;              /* 1 rpm/LSB */
@@ -71,9 +89,10 @@ typedef enum {
 
 uint8_t       vesc_crc8(const uint8_t *buf, uint8_t len);
 
-void          vesc_proto_encode_curr_dem (const vesc_curr_dem_t  *in, can_frame_t *out);
-void          vesc_proto_encode_omega_dem(const vesc_omega_dem_t *in, can_frame_t *out);
-void          vesc_proto_encode_duty_dem (const vesc_duty_dem_t  *in, can_frame_t *out);
+void          vesc_proto_encode_curr_dem      (const vesc_curr_dem_t       *in, can_frame_t *out);
+void          vesc_proto_encode_omega_dem     (const vesc_omega_dem_t      *in, can_frame_t *out);
+void          vesc_proto_encode_duty_dem      (const vesc_duty_dem_t       *in, can_frame_t *out);
+void          vesc_proto_encode_motor_type_cmd(const vesc_motor_type_cmd_t *in, can_frame_t *out);
 
 vesc_decode_t vesc_proto_decode_rect_state_concise(const can_frame_t *in,
                                                    vesc_rect_state_t *out);

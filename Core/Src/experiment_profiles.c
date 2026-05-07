@@ -29,62 +29,112 @@ const expt_profile_t starter_gen_profile = {
     .loop     = false,
 };
 
-/* --- Phase 1: VESC-as-motor bring-up ------------------------------------
+/* --- Phase 1: VESC-as-motor omega sweep ---------------------------------
  * Single VESC + free-shaft motor + bench PSU. No coupling, no battery.
- * Walks through all three control modes (CURRENT, OMEGA, DUTY) at low,
- * safe setpoints. Every phase blocks on operator advance — read VESC Tool
- * RT data + the sniffer + multimeter between transitions.
+ * Stepped sweep through omega setpoints from 1000 to 8000 eRPM.
+ * Each level: linear ramp from previous, then 5 s hold. Spindown at end.
+ *
+ * Reminder on units:
+ *   shaft mech RPM = setpoint_eRPM / pole_pairs
+ *   (e.g. 8000 eRPM with 4 pole pairs = 2000 mech RPM at the shaft)
  *
  * Bench safety:
- *   - PSU current-limited (≤2 A), V≈24 V.
- *   - Free shaft: motor will spin at whatever back-EMF balances. Watch RPM.
- *   - Each transition returns to a safe value before changing mode. */
+ *   - PSU current-limited (≤5 A) appropriate to the motor.
+ *   - Free shaft will spin at the commanded eRPM.
+ *   - VESC Speed PID Min ERPM in motor config must be ≤ smallest setpoint
+ *     converted to mech RPM, else the loop refuses to engage. */
 static const expt_phase_t phase1_motor_only_phases[] = {
-    /* P0: idle, current=0. Operator preps + advances when ready. */
-    { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 0,
-      .ramp_ms   = 0,   .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
+    /* P0: idle pre-arm. */
+    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 0,
+      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 3000,
       .pt_mode   = VESC_MODE_IDLE,    .label = "P0 idle" },
 
-    /* P1: small motoring current (+1.00 A). Verify shaft direction. */
-    { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 1000,        /*  +1.00 A */
-      .ramp_ms   = 1000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P1 I=+1A motoring" },
-
-    /* P2: small regen current (-1.00 A). Direction should reverse. */
-    { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = -1000,       /*  -1.00 A */
-      .ramp_ms   = 1000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_LAND,    .label = "P2 I=-1A regen" },
-
-    /* P3: ramp to zero before mode switch. */
-    { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 0,
-      .ramp_ms   = 500,  .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_IDLE,    .label = "P3 zero pre-omega" },
-
-    /* P4: low speed setpoint, 2000 eRPM. Verify mech RPM = eRPM/pole-pairs.
-     *      Needs FOC parameters identified in VESC Tool first. */
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 2000,       /* 2000 eRPM */
+    /* P1..P5: ladder up through omega setpoints. */
+    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 1000,       /* 1000 eRPM */
       .ramp_ms   = 2000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_CRUISE,  .label = "P4 omega=2k eRPM" },
+      .pt_mode   = VESC_MODE_CRUISE,  .label = "P1 omega=1k" },
 
-    /* P5: spindown to zero speed. */
+    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 2000,
+      .ramp_ms   = 2000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
+      .pt_mode   = VESC_MODE_CRUISE,  .label = "P2 omega=2k" },
+
+    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 4000,
+      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
+      .pt_mode   = VESC_MODE_CRUISE,  .label = "P3 omega=4k" },
+
+    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 6000,
+      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
+      .pt_mode   = VESC_MODE_CRUISE,  .label = "P4 omega=6k" },
+
+    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 8000,
+      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
+      .pt_mode   = VESC_MODE_CRUISE,  .label = "P5 omega=8k" },
+
+    /* P6: spindown to zero. expt_run() exits to (CURRENT, 0, IDLE). */
     { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 0,
-      .ramp_ms   = 2000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_IDLE,    .label = "P5 omega=0" },
-
-    /* P6: low duty cycle (10 %). Motor spins to back-EMF balance. */
-    { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 1000,       /* 10.00 %  */
-      .ramp_ms   = 1000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P6 duty=10%" },
-
-    /* P7: duty back to zero. expt_run() exits to (CURRENT, 0, IDLE). */
-    { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 0,
-      .ramp_ms   = 1000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_IDLE,    .label = "P7 duty=0 done" },
+      .ramp_ms   = 5000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 2000,
+      .pt_mode   = VESC_MODE_IDLE,    .label = "P6 omega=0 done" },
 };
 const expt_profile_t phase1_motor_only_profile = {
     .name     = "phase1_motor_only",
     .phases   = phase1_motor_only_phases,
     .n_phases = (uint8_t)(sizeof(phase1_motor_only_phases) / sizeof(phase1_motor_only_phases[0])),
+    .loop     = false,
+};
+
+/* --- Crank in BLDC, hand off to FOC at 2000 eRPM ------------------------
+ * Demonstrates the 0x104 motor-type switch:
+ *   P0: set BLDC, current=0, brief settle.
+ *   P1: BLDC, ramp duty 0 -> 30 %. Hold until rect_state.gen_rpm > 2000
+ *       (i.e. eRPM, since the field carries fabsf(mc_interface_get_rpm())
+ *       which is electrical RPM in 7.x).
+ *   P2: switch to FOC, command omega = 3000 eRPM. Step (no ramp from 0,
+ *       motor is already spinning >= 2000 eRPM in BLDC).
+ *   P3: FOC, omega 3000 -> 0 spindown.
+ *
+ * Bench notes:
+ *   - 30 % duty into a stalled motor is aggressive. PSU current limit
+ *     should be sized for the inrush; expect a brief spike before
+ *     back-EMF builds.
+ *   - BLDC sensorless startup needs the rotor to commutate cleanly on
+ *     zero-cross detection. With light shaft load this works; with a
+ *     heavy engine load you may need to tune commutation params first. */
+static bool cond_gen_erpm_above_2k(const powertrain_state_t *pt) {
+    return pt->rect_state.gen_rpm >= 2000;
+}
+
+static const expt_phase_t crank_to_foc_phases[] = {
+    /* P0: set BLDC, current=0. Gives VESC time to reconfigure before P1. */
+    { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 0,
+      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 1000,
+      .motor_type = EXPT_MOTOR_TYPE_BLDC,
+      .pt_mode   = VESC_MODE_IDLE,    .label = "P0 set BLDC idle" },
+
+    /* P1: BLDC duty ramp 0->30 %, hold until eRPM exceeds 2000. */
+    { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 1000,           /* 30.00 % */
+      .ramp_ms   = 1000, .hold_type = EXPT_HOLD_COND,
+      .hold_cond = cond_gen_erpm_above_2k,
+      .motor_type = EXPT_MOTOR_TYPE_KEEP,                          /* still BLDC */
+      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P1 BLDC duty=30% crank" },
+
+    /* P2: switch to FOC, step to omega=3000 eRPM. Motor is already
+     * spinning >2000 eRPM, so a step is the right transition — a ramp
+     * from 0 would tell the speed PID to *decelerate* first. */
+    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 3000,
+      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 10000,
+      .motor_type = EXPT_MOTOR_TYPE_FOC,
+      .pt_mode   = VESC_MODE_CRUISE,  .label = "P2 FOC omega=3k" },
+
+    /* P3: spindown. Stays in FOC. */
+    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 0,
+      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 1000,
+      .motor_type = EXPT_MOTOR_TYPE_KEEP,
+      .pt_mode   = VESC_MODE_IDLE,    .label = "P3 FOC spindown" },
+};
+const expt_profile_t crank_to_foc_profile = {
+    .name     = "crank_to_foc",
+    .phases   = crank_to_foc_phases,
+    .n_phases = (uint8_t)(sizeof(crank_to_foc_phases) / sizeof(crank_to_foc_phases[0])),
     .loop     = false,
 };
 

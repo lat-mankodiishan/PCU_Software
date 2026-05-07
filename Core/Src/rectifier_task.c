@@ -56,10 +56,18 @@ void rectifier_task_start(void) {
     osThreadNew(rectifier_task, NULL, &tattr);
 }
 
+/* 0x104 SendMotorTypeCmd is sent on every change of g_pt.rect_motor_type
+ * AND every MOTOR_TYPE_KEEPALIVE_TICKS as a keep-alive (covers frame loss).
+ * VESC dedups, so spurious re-sends are no-ops. */
+#define MOTOR_TYPE_KEEPALIVE_TICKS  200u   /* 200 × 5 ms = 1 s */
+
 static void rectifier_task(void *arg) {
     (void)arg;
     uint8_t   seq  = 0;
+    uint8_t   mt_seq = 0;
     uint32_t  next = osKernelGetTickCount();
+    vesc_motor_type_t prev_mt = (vesc_motor_type_t)0xFFu;   /* force initial TX */
+    uint32_t mt_ticks_since_tx = MOTOR_TYPE_KEEPALIVE_TICKS;
     can_frame_t f;
 
     for (;;) {
@@ -84,12 +92,14 @@ static void rectifier_task(void *arg) {
         int32_t   omega_now;
         int16_t   duty_now;
         vesc_mode_t pt_mode;
+        vesc_motor_type_t mt_now;
         osMutexAcquire(g_pt_mtx, osWaitForever);
         mode_now  = g_pt.rect_ctrl_mode;
         I_cA_now  = clamp_i16(g_pt.I_rect_cmd_cA,    -I_RECT_MAX_CA,   I_RECT_MAX_CA);
         omega_now = clamp_i32(g_pt.omega_e_cmd_erpm, -OMEGA_E_MAX_ERPM, OMEGA_E_MAX_ERPM);
         duty_now  = clamp_i16(g_pt.duty_cmd_x10000,  -DUTY_MAX_X10000,  DUTY_MAX_X10000);
         pt_mode   = g_pt.mode;
+        mt_now    = g_pt.rect_motor_type;
         osMutexRelease(g_pt_mtx);
 
         const uint8_t seq_now = seq++;
@@ -116,6 +126,21 @@ static void rectifier_task(void *arg) {
         }
         }
         (void)can_mgr_send(CAN_BUS_POWERTRAIN, &tx, 0);
+
+        /* --- 0x104 SendMotorTypeCmd: on-change + keep-alive ----------- */
+        mt_ticks_since_tx++;
+        if (mt_now != prev_mt || mt_ticks_since_tx >= MOTOR_TYPE_KEEPALIVE_TICKS) {
+            vesc_motor_type_cmd_t mt_cmd = {
+                .motor_type = mt_now,
+                .mode       = pt_mode,
+                .seq        = mt_seq++,
+            };
+            can_frame_t mt_tx;
+            vesc_proto_encode_motor_type_cmd(&mt_cmd, &mt_tx);
+            (void)can_mgr_send(CAN_BUS_POWERTRAIN, &mt_tx, 0);
+            prev_mt = mt_now;
+            mt_ticks_since_tx = 0;
+        }
 
         /* --- Staleness check ------------------------------------------ */
         osMutexAcquire(g_pt_mtx, osWaitForever);

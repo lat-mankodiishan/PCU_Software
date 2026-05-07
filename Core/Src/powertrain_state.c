@@ -10,7 +10,8 @@ static StaticSemaphore_t s_pt_mtx_cb;
 
 void pt_init(void) {
     memset(&g_pt, 0, sizeof(g_pt));
-    g_pt.mode = VESC_MODE_IDLE;
+    g_pt.mode            = VESC_MODE_IDLE;
+    g_pt.rect_motor_type = VESC_MOTOR_TYPE_FOC;     /* steady-state default */
 
     static const osMutexAttr_t attr = {
         .name      = "g_pt_mtx",
@@ -42,6 +43,12 @@ void pt_set_setpoint_duty(int16_t duty_cmd_x10000, vesc_mode_t mode) {
     g_pt.rect_ctrl_mode    = RECT_CTRL_DUTY;
     g_pt.duty_cmd_x10000   = duty_cmd_x10000;
     g_pt.mode              = mode;
+    osMutexRelease(g_pt_mtx);
+}
+
+void pt_set_motor_type(vesc_motor_type_t type) {
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    g_pt.rect_motor_type = type;
     osMutexRelease(g_pt_mtx);
 }
 

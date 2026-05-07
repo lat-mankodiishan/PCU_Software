@@ -5,9 +5,12 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-/* Pick which profile runs at boot. Re-flash to change.
- * Options today: &phase1_motor_only_profile, &starter_gen_profile, &dyno_sweep_profile. */
-#define EXPT_BOOT_PROFILE   (&phase1_motor_only_profile)
+/* Pick which profile runs at boot. Re-flash to change. Options:
+ *   &phase1_motor_only_profile  — omega ladder 0..8k eRPM
+ *   &crank_to_foc_profile       — BLDC@30%duty -> FOC@3k eRPM via 0x104
+ *   &starter_gen_profile        — manual-advance starter/gen bring-up
+ *   &dyno_sweep_profile         — auto eRPM ladder for characterization */
+#define EXPT_BOOT_PROFILE   (&crank_to_foc_profile)
 
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[256];        /* 1 KB */
