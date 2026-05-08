@@ -36,6 +36,7 @@
 #include "bms_task.h"
 #include "ecu_task.h"
 #include "experiment_task.h"
+#include "dyno_setup_task.h"
 #include "control_law_test.h"
 #include "periph_wrappers.h"
 
@@ -178,6 +179,7 @@ void MX_FREERTOS_Init(void) {
   rectifier_task_start();
   supervisor_task_start();
   expt_task_start();
+  dyno_setup_task_start();
   // pdb_task_start();
   sensor_task_start();
   log_task_start();

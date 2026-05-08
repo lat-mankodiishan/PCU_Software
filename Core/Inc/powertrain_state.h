@@ -74,6 +74,15 @@ typedef struct {
     /* Aggregated faults — OR of fault_id_t */
     uint16_t          fault_bits;
 
+    /* Dyno test bench — SSD-250A current sensor (ID 5FX-3, on CAN1).
+     * Native SSD broadcast LSBs preserved (no float conversion in PCU).
+     * Decoder lives in dyno_setup_task.c. */
+    int32_t           dyno_current_mA;       /* 1 mA   LSB, signed (charge/discharge) */
+    int32_t           dyno_vbus_mV;          /* 1 mV   LSB                            */
+    uint32_t          dyno_power_dW;         /* 0.1 W  LSB (= raw from 0x5F5)         */
+    uint64_t          dyno_energy_Wh;        /* 1 Wh   LSB (= raw from 0x5F6)         */
+    uint32_t          dyno_input_tick;       /* osKernelGetTickCount of last RX       */
+
     /* Experiment runner state — written by experiment.c, read by supervisor
      * (gates the I_bat closed-loop) and log_task. expt_label points into
      * static-const profile data, so it lives as long as the firmware does.
