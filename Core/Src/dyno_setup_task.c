@@ -35,15 +35,23 @@
 #define DYNO_DRAIN_PERIOD_MS    20      /* 50 Hz drain */
 #define DYNO_RX_QUEUE_DEPTH     16
 
-/* SSD-250A sensor #3 (5FX-3) base ID. The seven readout IDs are 0x5F1..0x5F7;
- * filter on 0x5F0 with mask 0x7F8 catches 0x5F0..0x5F7 (one don't-care bank). */
-#define DYNO_FILTER_ID         0x5F0u
-#define DYNO_FILTER_MASK       0x7F8u
+/* SSD-250A sensor #3 (5FX-3) — source/reference current. IDs 0x5F1..0x5F7.
+ * SSD-250A sensor #2 (4FX-2) — load/feedback current.    IDs 0x4F1..0x4F7.
+ * Two HW filter banks, one per sensor block. */
+#define DYNO_FILTER_5FX_ID     0x5F0u
+#define DYNO_FILTER_5FX_MASK   0x7F8u
+#define DYNO_FILTER_4FX_ID     0x4F0u
+#define DYNO_FILTER_4FX_MASK   0x7F8u
 
 #define SSD3_CURRENT           0x5F1u
 #define SSD3_VBUS              0x5F3u
 #define SSD3_POWER             0x5F5u
 #define SSD3_ENERGY            0x5F6u
+
+#define SSD2_CURRENT           0x4F1u
+#define SSD2_VBUS              0x4F3u
+#define SSD2_POWER             0x4F5u
+#define SSD2_ENERGY            0x4F6u
 
 /* SSD command channel — used to enable broadcast bits + set rate at boot. */
 #define SSD_CAN_ID_SET_COMMAND      0x3FAu
@@ -124,7 +132,9 @@ static void dyno_parse_frame(const can_frame_t *f) {
     g_dyno_rx_frames++;
 
     osMutexAcquire(g_pt_mtx, osWaitForever);
+    bool is_load = false;
     switch (f->id) {
+    /* --- Source sensor (5FX-3) --- */
     case SSD3_CURRENT:
         g_pt.dyno_current_mA = (int32_t)le_u64(f->data, f->dlc);
         g_dyno_rx_current++;
@@ -141,11 +151,29 @@ static void dyno_parse_frame(const can_frame_t *f) {
         g_pt.dyno_energy_Wh = le_u64(f->data, f->dlc);
         g_dyno_rx_energy++;
         break;
+    /* --- Load sensor (4FX-2) --- */
+    case SSD2_CURRENT:
+        g_pt.dyno_load_current_mA = (int32_t)le_u64(f->data, f->dlc);
+        is_load = true;
+        break;
+    case SSD2_VBUS:
+        g_pt.dyno_load_vbus_mV = (int32_t)le_u64(f->data, f->dlc);
+        is_load = true;
+        break;
+    case SSD2_POWER:
+        g_pt.dyno_load_power_dW = (uint32_t)le_u64(f->data, f->dlc);
+        is_load = true;
+        break;
+    case SSD2_ENERGY:
+        g_pt.dyno_load_energy_Wh = le_u64(f->data, f->dlc);
+        is_load = true;
+        break;
     default:
         osMutexRelease(g_pt_mtx);
         return;       /* don't bump tick on unrecognised IDs */
     }
-    g_pt.dyno_input_tick = osKernelGetTickCount();
+    if (is_load) g_pt.dyno_load_input_tick = osKernelGetTickCount();
+    else         g_pt.dyno_input_tick      = osKernelGetTickCount();
     osMutexRelease(g_pt_mtx);
 }
 
@@ -160,8 +188,9 @@ void dyno_setup_task_start(void) {
     s_rx_q = osMessageQueueNew(DYNO_RX_QUEUE_DEPTH,
                                sizeof(can_frame_t), &qattr);
 
-    /* Standard 11-bit, base 0x5F0 with don't-care low 3 bits → 0x5F0..0x5F7. */
-    can_mgr_subscribe(DYNO_BUS, DYNO_FILTER_ID, DYNO_FILTER_MASK, false, s_rx_q);
+    /* Two filter banks: 5FX-3 (0x5F0..7) + 4FX-2 (0x4F0..7), same RX queue. */
+    can_mgr_subscribe(DYNO_BUS, DYNO_FILTER_5FX_ID, DYNO_FILTER_5FX_MASK, false, s_rx_q);
+    can_mgr_subscribe(DYNO_BUS, DYNO_FILTER_4FX_ID, DYNO_FILTER_4FX_MASK, false, s_rx_q);
 
     static const osThreadAttr_t tattr = {
         .name       = "dyno",

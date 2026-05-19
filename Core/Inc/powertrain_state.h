@@ -88,6 +88,25 @@ typedef struct {
     uint64_t          dyno_energy_Wh;        /* 1 Wh   LSB (= raw from 0x5F6)         */
     uint32_t          dyno_input_tick;       /* osKernelGetTickCount of last RX       */
 
+    /* Dyno load sensor — second SSD-250A on ID block 4FX-2 (0x4F1..0x4F7).
+     * Measures load-side current; used as feedback for the throttle PI loop
+     * that drives the load to match the 5FX reference. */
+    int32_t           dyno_load_current_mA;    /* 1 mA   LSB, signed */
+    int32_t           dyno_load_vbus_mV;       /* 1 mV   LSB         */
+    uint32_t          dyno_load_power_dW;      /* 0.1 W  LSB         */
+    uint64_t          dyno_load_energy_Wh;     /* 1 Wh   LSB         */
+    uint32_t          dyno_load_input_tick;    /* osKernelGetTickCount of last RX */
+
+    /* Throttle PI controller (throttle_ctrl_task.c) — drives load current
+     * (4FX) to match source current (5FX) via PWM on PA10 / TIM1_CH3.
+     * Default disabled; flip throttle_ctrl_enabled = true at runtime
+     * once both sensors are confirmed reading sane values. */
+    bool              throttle_ctrl_enabled;   /* gate the loop                  */
+    uint16_t          throttle_pwm_duty;       /* 0..1599 (TIM1 ARR = 1599)      */
+    int32_t           throttle_current_err_mA; /* 4FX − 5FX_filt, debug          */
+    int32_t           throttle_src_filt_mA;    /* 5FX after N-tap moving avg     */
+    uint32_t          throttle_ctrl_tick;      /* last loop iteration timestamp  */
+
     /* Experiment runner state — written by experiment.c, read by supervisor
      * (gates the I_bat closed-loop) and log_task. expt_label points into
      * static-const profile data, so it lives as long as the firmware does.
