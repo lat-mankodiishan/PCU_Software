@@ -35,17 +35,6 @@ typedef enum {
     EXPT_INVERT_DIR_INVERTED = 2,
 } expt_invert_dir_t;
 
-/* Per-phase aux GPIO output (default = leave alone). Pin defined in
- * experiment.c (EXPT_AUX_GPIO_PORT/PIN) — must be configured as
- * GPIO_Output in CubeMX. Use to drive a sequencing signal — e.g., a
- * "crank-active" line that goes HIGH during the BLDC crank/release
- * phases and LOW once FOC takes over. */
-typedef enum {
-    EXPT_AUX_GPIO_KEEP = 0,
-    EXPT_AUX_GPIO_LOW  = 1,
-    EXPT_AUX_GPIO_HIGH = 2,
-} expt_aux_gpio_t;
-
 typedef struct {
     rect_ctrl_mode_t  ctrl_mode;     /* CURRENT / OMEGA / DUTY                  */
     int32_t           setpoint;      /* cA / eRPM / x10000 — per ctrl_mode      */
@@ -55,7 +44,6 @@ typedef struct {
     expt_cond_fn      hold_cond;     /* used when hold_type == EXPT_HOLD_COND   */
     expt_motor_type_t motor_type;    /* set 0x104 motor_type at phase entry; KEEP = leave as-is */
     expt_invert_dir_t invert_dir;    /* set 0x105 invert direction at phase entry; KEEP = leave as-is */
-    expt_aux_gpio_t   aux_gpio;      /* drive EXPT_AUX_GPIO at phase entry; KEEP = leave as-is */
     vesc_mode_t       pt_mode;       /* tag written into g_pt.mode              */
     const char       *label;         /* must not contain commas (CSV-safe)      */
 } expt_phase_t;

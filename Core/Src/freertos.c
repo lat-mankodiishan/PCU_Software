@@ -204,6 +204,12 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+  /* One-shot PA3 pulse at boot: drive HIGH, hold 1 s, drive LOW.
+   * PA3 is configured as GPIO_Output_PP in CubeMX (see MX_GPIO_Init). */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
+  osDelay(1000);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
+
   /* supervisor_task is now the sole writer of pt_set_setpoint (running
    * the I_bat closed-loop — see USE_IBAT_CONTROL_LAW in supervisor_task.c)
    * and the sole watchdog kicker. defaultTask just stays alive. */

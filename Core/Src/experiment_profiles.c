@@ -17,90 +17,73 @@ static bool cond_button_pressed(const powertrain_state_t *pt) {
     return HAL_GPIO_ReadPin(EXPT_BTN_PORT, EXPT_BTN_PIN) == GPIO_PIN_SET;
 }
 
-static bool cond_button_released(const powertrain_state_t *pt) {
-    (void)pt;
-    return HAL_GPIO_ReadPin(EXPT_BTN_PORT, EXPT_BTN_PIN) == GPIO_PIN_RESET;
-}
-
 /* --- Starter-generator dyno run -----------------------------------------
- * Cranks the SG in BLDC duty (fixed voltage, handles engine TDC spikes
- * cleanly), then on button press releases the motor so the engine can
- * spin the SG freely without BLDC commutation fighting it. Button
- * release advances to FOC handoff + duty ladder.
+ * Single-switch handoff. Stay in BLDC at 5 % crank duty; manually
+ * throttle the engine up in this phase. Once the engine is driving the
+ * SG faster than the commanded duty you'll see regen on the bus —
+ * that's the cue to flip the switch HIGH, which hands off to FOC.
  *
- *   P0: BLDC, 5 % duty — cranks the engine through TDC. Held until the
- *       button GPIO goes HIGH (you press when engine has fired).
- *   P1: BLDC, CURRENT = 0 — released. Engine free-spools the SG; throttle
- *       up here. Held while button is HELD; advances when you release it.
- *       (Quick tap = blast through. Long press = throttle ramp window.)
- *   P2: FOC + INVERTED, CURRENT = 0, 0.5 s — observer locks onto the
+ *   P0: BLDC, 5 % duty — cranks through TDC, then becomes regen as the
+ *       engine accelerates past the commanded speed. Held until switch
+ *       goes HIGH.
+ *   P1: BLDC, CURRENT = 0, 0.3 s — auto-bleed. Drops phase current to 0
+ *       in BLDC mode BEFORE the motor-type swap, so FETs go into a
+ *       controlled free-wheel state. Without this the BLDC→FOC reconfig
+ *       happens while current is flowing → body-diode regen pulses and
+ *       cogging when the FOC observer cold-starts.
+ *   P2: FOC + INVERTED, CURRENT = 0, 1.0 s — observer locks onto the
  *       spinning rotor at zero torque before duty kicks in.
  *   P3: FOC, INVERTED, duty = 10 %, 5 s.
  *   P4: FOC, INVERTED, duty = 14 %, 5 s.
  *   P5: FOC, INVERTED, duty = 18 %, 5 s.
  *   (exit -> CURRENT 0 IDLE)
  *
- * Wire units: duty in 0.01 %/LSB (500 = 5.00 %, 1000 = 10.00 %, etc.).
- *
- * Why P1 is BLDC current=0 not duty=0: duty=0 leaves the FETs in a
- * synchronous-rectification configuration each commutation step, which
- * acts as a dynamic brake when the engine over-spins the rotor. CURRENT
- * mode at 0 A regulates phase current to zero so the rotor free-wheels
- * with minimal opposition. */
+ * Wire units: duty in 0.01 %/LSB (500 = 5.00 %, 1000 = 10.00 %, etc.). */
 static const expt_phase_t starter_gen_phases[] = {
-    /* P0: BLDC crank at 5 % duty. Hold until button PRESSED (HIGH).
-     * Press the button the moment the engine fires.
-     * PA3 driven HIGH — signals "cranking active". */
+    /* P0: BLDC crank at 5 % duty. Throttle the engine up by hand here;
+     * once you see regen on the bus, flip the switch HIGH to advance. */
     { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 500,             /* 5.00 % */
       .ramp_ms   = 0,    .hold_type = EXPT_HOLD_COND,
       .hold_cond = cond_button_pressed,
       .motor_type = EXPT_MOTOR_TYPE_BLDC,
       .invert_dir = EXPT_INVERT_DIR_NORMAL,
-      .aux_gpio  = EXPT_AUX_GPIO_HIGH,
-      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P0 BLDC duty=5pct wait btn" },
+      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P0 BLDC duty=5pct wait switch" },
 
-    /* P1: BLDC release (current = 0). Hold while button is HELD HIGH;
-     * advances when you release the button. Throttle up the engine
-     * during this window. PA3 stays HIGH (KEEP). */
+    /* P1: auto-bleed. Still BLDC + NORMAL, but switch to CURRENT = 0
+     * for 300 ms so phase current decays to zero before the motor-type
+     * swap. */
     { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 0,
-      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_COND,
-      .hold_cond = cond_button_released,
+      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 300,
       .motor_type = EXPT_MOTOR_TYPE_KEEP,                          /* still BLDC */
       .invert_dir = EXPT_INVERT_DIR_KEEP,
-      .aux_gpio  = EXPT_AUX_GPIO_KEEP,                             /* stays HIGH */
-      .pt_mode   = VESC_MODE_IDLE,    .label = "P1 BLDC release hold btn" },
+      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P1 BLDC bleed I=0" },
 
-    /* P2: switch to FOC + INVERTED, current still 0. Observer locks
-     * onto the engine-driven rotor before any duty is applied.
-     * PA3 driven LOW — signals "FOC takeover, no longer cranking". */
+    /* P2: switch to FOC + INVERTED, current = 0. Observer locks onto
+     * the engine-driven rotor before any duty is applied. 1.0 s gives
+     * the back-EMF observer comfortable headroom to converge. */
     { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 0,
-      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 500,
+      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 1000,
       .motor_type = EXPT_MOTOR_TYPE_FOC,
       .invert_dir = EXPT_INVERT_DIR_INVERTED,
-      .aux_gpio  = EXPT_AUX_GPIO_LOW,
-      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P2 FOC inv release lock" },
+      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P2 FOC inv observer lock" },
 
-    /* P3..P5: duty ladder inside FOC, 0.5 s ramp + 5 s hold per step.
-     * PA3 stays LOW (KEEP). */
+    /* P3..P5: duty ladder inside FOC, 0.5 s ramp + 5 s hold per step. */
     { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 1000,            /* 10.00 % */
       .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
       .motor_type = EXPT_MOTOR_TYPE_KEEP,
       .invert_dir = EXPT_INVERT_DIR_KEEP,
-      .aux_gpio  = EXPT_AUX_GPIO_KEEP,
       .pt_mode   = VESC_MODE_CRUISE,  .label = "P3 FOC inv duty=10pct" },
 
     { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 1400,            /* 14.00 % */
       .ramp_ms   = 500,  .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
       .motor_type = EXPT_MOTOR_TYPE_KEEP,
       .invert_dir = EXPT_INVERT_DIR_KEEP,
-      .aux_gpio  = EXPT_AUX_GPIO_KEEP,
       .pt_mode   = VESC_MODE_CRUISE,  .label = "P4 FOC inv duty=14pct" },
 
     { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 1800,            /* 18.00 % */
       .ramp_ms   = 500,  .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
       .motor_type = EXPT_MOTOR_TYPE_KEEP,
       .invert_dir = EXPT_INVERT_DIR_KEEP,
-      .aux_gpio  = EXPT_AUX_GPIO_KEEP,
       .pt_mode   = VESC_MODE_CRUISE,  .label = "P5 FOC inv duty=18pct" },
 
     /* expt_run() exits to (CURRENT, 0, IDLE) automatically after P5 —
