@@ -6,12 +6,6 @@
 
 #define EXPT_TICK_MS  10        /* 100 Hz update during ramps and waits */
 
-/* Aux GPIO controlled per-phase via expt_phase_t.aux_gpio. Configure
- * this pin as GPIO_Output in CubeMX (.ioc). If you change the port,
- * adjust both the port macro and ensure CubeMX has the new pin set up. */
-#define EXPT_AUX_GPIO_PORT   GPIOA
-#define EXPT_AUX_GPIO_PIN    GPIO_PIN_3
-
 /* ---- g_pt accessors ---------------------------------------------------- */
 
 static void mark_state(bool active, uint8_t phase_idx, const char *label) {
@@ -96,18 +90,6 @@ static void run_phase(const expt_phase_t *p, uint8_t idx) {
     default: break;
     }
 
-    /* Aux GPIO drive — single-write, no settle needed. */
-    switch (p->aux_gpio) {
-    case EXPT_AUX_GPIO_HIGH:
-        HAL_GPIO_WritePin(EXPT_AUX_GPIO_PORT, EXPT_AUX_GPIO_PIN, GPIO_PIN_SET);
-        break;
-    case EXPT_AUX_GPIO_LOW:
-        HAL_GPIO_WritePin(EXPT_AUX_GPIO_PORT, EXPT_AUX_GPIO_PIN, GPIO_PIN_RESET);
-        break;
-    case EXPT_AUX_GPIO_KEEP:
-    default: break;
-    }
-
     const int32_t prev = prev_setpoint(p->ctrl_mode);
 
     /* Ramp from prev to p->setpoint over p->ramp_ms (or step if 0). */
@@ -169,10 +151,8 @@ void expt_run(const expt_profile_t *profile) {
         }
     } while (profile->loop && !peek_abort());
 
-    /* Safe idle on completion / abort. Also drive aux GPIO LOW so any
-     * external "test active" indicator clears. */
+    /* Safe idle on completion / abort. */
     pt_set_setpoint(0, VESC_MODE_IDLE);
-    HAL_GPIO_WritePin(EXPT_AUX_GPIO_PORT, EXPT_AUX_GPIO_PIN, GPIO_PIN_RESET);
     mark_state(false, 0, NULL);
 }
 
