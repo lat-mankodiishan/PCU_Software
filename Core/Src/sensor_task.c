@@ -6,7 +6,7 @@
 #include "semphr.h"
 #include <string.h>
 
-#define SENSOR_PERIOD_MS   10       /* 100 Hz */
+#define SENSOR_PERIOD_MS   100       /* 10 Hz */
 
 static StaticTask_t      s_tcb;
 static StackType_t       s_stack[384];        /* 1.5 KB */

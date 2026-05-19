@@ -56,18 +56,22 @@ void rectifier_task_start(void) {
     osThreadNew(rectifier_task, NULL, &tattr);
 }
 
-/* 0x104 SendMotorTypeCmd is sent on every change of g_pt.rect_motor_type
- * AND every MOTOR_TYPE_KEEPALIVE_TICKS as a keep-alive (covers frame loss).
+/* 0x104 SendMotorTypeCmd / 0x105 SendInvertDirCmd are sent on every change
+ * AND every KEEPALIVE_TICKS as a keep-alive (covers frame loss).
  * VESC dedups, so spurious re-sends are no-ops. */
 #define MOTOR_TYPE_KEEPALIVE_TICKS  200u   /* 200 × 5 ms = 1 s */
+#define INVERT_DIR_KEEPALIVE_TICKS  200u
 
 static void rectifier_task(void *arg) {
     (void)arg;
     uint8_t   seq  = 0;
     uint8_t   mt_seq = 0;
+    uint8_t   id_seq = 0;
     uint32_t  next = osKernelGetTickCount();
     vesc_motor_type_t prev_mt = (vesc_motor_type_t)0xFFu;   /* force initial TX */
+    uint8_t           prev_id = 0xFFu;                      /* force initial TX */
     uint32_t mt_ticks_since_tx = MOTOR_TYPE_KEEPALIVE_TICKS;
+    uint32_t id_ticks_since_tx = INVERT_DIR_KEEPALIVE_TICKS;
     can_frame_t f;
 
     for (;;) {
@@ -93,6 +97,7 @@ static void rectifier_task(void *arg) {
         int16_t   duty_now;
         vesc_mode_t pt_mode;
         vesc_motor_type_t mt_now;
+        uint8_t   id_now;
         osMutexAcquire(g_pt_mtx, osWaitForever);
         mode_now  = g_pt.rect_ctrl_mode;
         I_cA_now  = clamp_i16(g_pt.I_rect_cmd_cA,    -I_RECT_MAX_CA,   I_RECT_MAX_CA);
@@ -100,6 +105,7 @@ static void rectifier_task(void *arg) {
         duty_now  = clamp_i16(g_pt.duty_cmd_x10000,  -DUTY_MAX_X10000,  DUTY_MAX_X10000);
         pt_mode   = g_pt.mode;
         mt_now    = g_pt.rect_motor_type;
+        id_now    = g_pt.rect_invert_direction ? 1u : 0u;
         osMutexRelease(g_pt_mtx);
 
         const uint8_t seq_now = seq++;
@@ -140,6 +146,21 @@ static void rectifier_task(void *arg) {
             (void)can_mgr_send(CAN_BUS_POWERTRAIN, &mt_tx, 0);
             prev_mt = mt_now;
             mt_ticks_since_tx = 0;
+        }
+
+        /* --- 0x105 SendInvertDirCmd: on-change + keep-alive ----------- */
+        id_ticks_since_tx++;
+        if (id_now != prev_id || id_ticks_since_tx >= INVERT_DIR_KEEPALIVE_TICKS) {
+            vesc_invert_dir_cmd_t id_cmd = {
+                .invert_direction = id_now ? true : false,
+                .mode             = pt_mode,
+                .seq              = id_seq++,
+            };
+            can_frame_t id_tx;
+            vesc_proto_encode_invert_dir_cmd(&id_cmd, &id_tx);
+            (void)can_mgr_send(CAN_BUS_POWERTRAIN, &id_tx, 0);
+            prev_id = id_now;
+            id_ticks_since_tx = 0;
         }
 
         /* --- Staleness check ------------------------------------------ */

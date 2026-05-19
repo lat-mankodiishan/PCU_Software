@@ -1,166 +1,114 @@
 #include "experiment_profiles.h"
+#include "main.h"               /* GPIO_Pin defines */
+#include "stm32f4xx_hal.h"      /* HAL_GPIO_ReadPin */
 
 /* Phase labels must not contain commas — log_task emits them raw into CSV. */
 
-/* --- Starter-generator manual bring-up ----------------------------------
- * Phase 0: motor the engine at 6000 eRPM. Operator advances throttle by
- *          hand until rect_state shows positive I_dc (generation), then
- *          pokes g_pt.expt_advance_req from the debugger.
- * Phase 1: switch to current control, draw 10 A from the alternator.
- *          Operator advances when the current-mode test is done.
- * Phase 2: ramp to 0 A, hold for shutdown. */
+/* ---- Button GPIO for HOLD_COND advance ---------------------------------
+ * Switch wired between this pin and 3V3. Configured as INPUT in CubeMX
+ * (.ioc), so MX_GPIO_Init() at boot owns the pin setup. Make sure the
+ * CubeMX config has pull-down enabled (or use an external pull-down) —
+ * otherwise an open switch floats and reads unpredictably. */
+#define EXPT_BTN_PORT       GPIOA
+#define EXPT_BTN_PIN        GPIO_PIN_7
+
+static bool cond_button_pressed(const powertrain_state_t *pt) {
+    (void)pt;
+    return HAL_GPIO_ReadPin(EXPT_BTN_PORT, EXPT_BTN_PIN) == GPIO_PIN_SET;
+}
+
+static bool cond_button_released(const powertrain_state_t *pt) {
+    (void)pt;
+    return HAL_GPIO_ReadPin(EXPT_BTN_PORT, EXPT_BTN_PIN) == GPIO_PIN_RESET;
+}
+
+/* --- Starter-generator dyno run -----------------------------------------
+ * Cranks the SG in BLDC duty (fixed voltage, handles engine TDC spikes
+ * cleanly), then on button press releases the motor so the engine can
+ * spin the SG freely without BLDC commutation fighting it. Button
+ * release advances to FOC handoff + duty ladder.
+ *
+ *   P0: BLDC, 5 % duty — cranks the engine through TDC. Held until the
+ *       button GPIO goes HIGH (you press when engine has fired).
+ *   P1: BLDC, CURRENT = 0 — released. Engine free-spools the SG; throttle
+ *       up here. Held while button is HELD; advances when you release it.
+ *       (Quick tap = blast through. Long press = throttle ramp window.)
+ *   P2: FOC + INVERTED, CURRENT = 0, 0.5 s — observer locks onto the
+ *       spinning rotor at zero torque before duty kicks in.
+ *   P3: FOC, INVERTED, duty = 10 %, 5 s.
+ *   P4: FOC, INVERTED, duty = 14 %, 5 s.
+ *   P5: FOC, INVERTED, duty = 18 %, 5 s.
+ *   (exit -> CURRENT 0 IDLE)
+ *
+ * Wire units: duty in 0.01 %/LSB (500 = 5.00 %, 1000 = 10.00 %, etc.).
+ *
+ * Why P1 is BLDC current=0 not duty=0: duty=0 leaves the FETs in a
+ * synchronous-rectification configuration each commutation step, which
+ * acts as a dynamic brake when the engine over-spins the rotor. CURRENT
+ * mode at 0 A regulates phase current to zero so the rotor free-wheels
+ * with minimal opposition. */
 static const expt_phase_t starter_gen_phases[] = {
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 6000,
-      .ramp_ms   = 2000, .hold_type = EXPT_HOLD_OP,
-      .pt_mode   = VESC_MODE_TAKEOFF, .label = "motor 6000 eRPM" },
+    /* P0: BLDC crank at 5 % duty. Hold until button PRESSED (HIGH).
+     * Press the button the moment the engine fires.
+     * PA3 driven HIGH — signals "cranking active". */
+    { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 500,             /* 5.00 % */
+      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_COND,
+      .hold_cond = cond_button_pressed,
+      .motor_type = EXPT_MOTOR_TYPE_BLDC,
+      .invert_dir = EXPT_INVERT_DIR_NORMAL,
+      .aux_gpio  = EXPT_AUX_GPIO_HIGH,
+      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P0 BLDC duty=5pct wait btn" },
 
-    { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 1000,    /* 10.00 A */
-      .ramp_ms   = 500,  .hold_type = EXPT_HOLD_OP,
-      .pt_mode   = VESC_MODE_CRUISE,  .label = "generate 10A" },
-
+    /* P1: BLDC release (current = 0). Hold while button is HELD HIGH;
+     * advances when you release the button. Throttle up the engine
+     * during this window. PA3 stays HIGH (KEEP). */
     { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 0,
-      .ramp_ms   = 500,  .hold_type = EXPT_HOLD_OP,
-      .pt_mode   = VESC_MODE_IDLE,    .label = "idle" },
+      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_COND,
+      .hold_cond = cond_button_released,
+      .motor_type = EXPT_MOTOR_TYPE_KEEP,                          /* still BLDC */
+      .invert_dir = EXPT_INVERT_DIR_KEEP,
+      .aux_gpio  = EXPT_AUX_GPIO_KEEP,                             /* stays HIGH */
+      .pt_mode   = VESC_MODE_IDLE,    .label = "P1 BLDC release hold btn" },
+
+    /* P2: switch to FOC + INVERTED, current still 0. Observer locks
+     * onto the engine-driven rotor before any duty is applied.
+     * PA3 driven LOW — signals "FOC takeover, no longer cranking". */
+    { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 0,
+      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 500,
+      .motor_type = EXPT_MOTOR_TYPE_FOC,
+      .invert_dir = EXPT_INVERT_DIR_INVERTED,
+      .aux_gpio  = EXPT_AUX_GPIO_LOW,
+      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P2 FOC inv release lock" },
+
+    /* P3..P5: duty ladder inside FOC, 0.5 s ramp + 5 s hold per step.
+     * PA3 stays LOW (KEEP). */
+    { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 1000,            /* 10.00 % */
+      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
+      .motor_type = EXPT_MOTOR_TYPE_KEEP,
+      .invert_dir = EXPT_INVERT_DIR_KEEP,
+      .aux_gpio  = EXPT_AUX_GPIO_KEEP,
+      .pt_mode   = VESC_MODE_CRUISE,  .label = "P3 FOC inv duty=10pct" },
+
+    { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 1400,            /* 14.00 % */
+      .ramp_ms   = 500,  .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
+      .motor_type = EXPT_MOTOR_TYPE_KEEP,
+      .invert_dir = EXPT_INVERT_DIR_KEEP,
+      .aux_gpio  = EXPT_AUX_GPIO_KEEP,
+      .pt_mode   = VESC_MODE_CRUISE,  .label = "P4 FOC inv duty=14pct" },
+
+    { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 1800,            /* 18.00 % */
+      .ramp_ms   = 500,  .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
+      .motor_type = EXPT_MOTOR_TYPE_KEEP,
+      .invert_dir = EXPT_INVERT_DIR_KEEP,
+      .aux_gpio  = EXPT_AUX_GPIO_KEEP,
+      .pt_mode   = VESC_MODE_CRUISE,  .label = "P5 FOC inv duty=18pct" },
+
+    /* expt_run() exits to (CURRENT, 0, IDLE) automatically after P5 —
+     * clean motor release without a duty-ramp-down regen spike. */
 };
 const expt_profile_t starter_gen_profile = {
     .name     = "starter_gen",
     .phases   = starter_gen_phases,
     .n_phases = (uint8_t)(sizeof(starter_gen_phases) / sizeof(starter_gen_phases[0])),
-    .loop     = false,
-};
-
-/* --- Phase 1: VESC-as-motor omega sweep ---------------------------------
- * Single VESC + free-shaft motor + bench PSU. No coupling, no battery.
- * Stepped sweep through omega setpoints from 1000 to 8000 eRPM.
- * Each level: linear ramp from previous, then 5 s hold. Spindown at end.
- *
- * Reminder on units:
- *   shaft mech RPM = setpoint_eRPM / pole_pairs
- *   (e.g. 8000 eRPM with 4 pole pairs = 2000 mech RPM at the shaft)
- *
- * Bench safety:
- *   - PSU current-limited (≤5 A) appropriate to the motor.
- *   - Free shaft will spin at the commanded eRPM.
- *   - VESC Speed PID Min ERPM in motor config must be ≤ smallest setpoint
- *     converted to mech RPM, else the loop refuses to engage. */
-static const expt_phase_t phase1_motor_only_phases[] = {
-    /* P0: idle pre-arm. */
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 0,
-      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 3000,
-      .pt_mode   = VESC_MODE_IDLE,    .label = "P0 idle" },
-
-    /* P1..P5: ladder up through omega setpoints. */
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 1000,       /* 1000 eRPM */
-      .ramp_ms   = 2000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_CRUISE,  .label = "P1 omega=1k" },
-
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 2000,
-      .ramp_ms   = 2000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_CRUISE,  .label = "P2 omega=2k" },
-
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 4000,
-      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_CRUISE,  .label = "P3 omega=4k" },
-
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 6000,
-      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_CRUISE,  .label = "P4 omega=6k" },
-
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 8000,
-      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_CRUISE,  .label = "P5 omega=8k" },
-
-    /* P6: spindown to zero. expt_run() exits to (CURRENT, 0, IDLE). */
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 0,
-      .ramp_ms   = 5000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 2000,
-      .pt_mode   = VESC_MODE_IDLE,    .label = "P6 omega=0 done" },
-};
-const expt_profile_t phase1_motor_only_profile = {
-    .name     = "phase1_motor_only",
-    .phases   = phase1_motor_only_phases,
-    .n_phases = (uint8_t)(sizeof(phase1_motor_only_phases) / sizeof(phase1_motor_only_phases[0])),
-    .loop     = false,
-};
-
-/* --- Crank in BLDC, hand off to FOC at 2000 eRPM ------------------------
- * Demonstrates the 0x104 motor-type switch:
- *   P0: set BLDC, current=0, brief settle.
- *   P1: BLDC, ramp duty 0 -> 30 %. Hold until rect_state.gen_rpm > 2000
- *       (i.e. eRPM, since the field carries fabsf(mc_interface_get_rpm())
- *       which is electrical RPM in 7.x).
- *   P2: switch to FOC, command omega = 3000 eRPM. Step (no ramp from 0,
- *       motor is already spinning >= 2000 eRPM in BLDC).
- *   P3: FOC, omega 3000 -> 0 spindown.
- *
- * Bench notes:
- *   - 30 % duty into a stalled motor is aggressive. PSU current limit
- *     should be sized for the inrush; expect a brief spike before
- *     back-EMF builds.
- *   - BLDC sensorless startup needs the rotor to commutate cleanly on
- *     zero-cross detection. With light shaft load this works; with a
- *     heavy engine load you may need to tune commutation params first. */
-static bool cond_gen_erpm_above_2k(const powertrain_state_t *pt) {
-    return pt->rect_state.gen_rpm >= 2000;
-}
-
-static const expt_phase_t crank_to_foc_phases[] = {
-    /* P0: set BLDC, current=0. Gives VESC time to reconfigure before P1. */
-    { .ctrl_mode = RECT_CTRL_CURRENT, .setpoint = 0,
-      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 1000,
-      .motor_type = EXPT_MOTOR_TYPE_BLDC,
-      .pt_mode   = VESC_MODE_IDLE,    .label = "P0 set BLDC idle" },
-
-    /* P1: BLDC duty ramp 0->30 %, hold until eRPM exceeds 2000. */
-    { .ctrl_mode = RECT_CTRL_DUTY,    .setpoint = 1000,           /* 30.00 % */
-      .ramp_ms   = 1000, .hold_type = EXPT_HOLD_COND,
-      .hold_cond = cond_gen_erpm_above_2k,
-      .motor_type = EXPT_MOTOR_TYPE_KEEP,                          /* still BLDC */
-      .pt_mode   = VESC_MODE_TAKEOFF, .label = "P1 BLDC duty=30% crank" },
-
-    /* P2: switch to FOC, step to omega=3000 eRPM. Motor is already
-     * spinning >2000 eRPM, so a step is the right transition — a ramp
-     * from 0 would tell the speed PID to *decelerate* first. */
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 3000,
-      .ramp_ms   = 0,    .hold_type = EXPT_HOLD_TIME, .hold_ms = 10000,
-      .motor_type = EXPT_MOTOR_TYPE_FOC,
-      .pt_mode   = VESC_MODE_CRUISE,  .label = "P2 FOC omega=3k" },
-
-    /* P3: spindown. Stays in FOC. */
-    { .ctrl_mode = RECT_CTRL_OMEGA,   .setpoint = 0,
-      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 1000,
-      .motor_type = EXPT_MOTOR_TYPE_KEEP,
-      .pt_mode   = VESC_MODE_IDLE,    .label = "P3 FOC spindown" },
-};
-const expt_profile_t crank_to_foc_profile = {
-    .name     = "crank_to_foc",
-    .phases   = crank_to_foc_phases,
-    .n_phases = (uint8_t)(sizeof(crank_to_foc_phases) / sizeof(crank_to_foc_phases[0])),
-    .loop     = false,
-};
-
-/* --- Automatic dyno sweep -----------------------------------------------
- * eRPM ladder: ramp up over ramp_ms, hold for hold_ms, then move to next.
- * Edit numbers freely. */
-static const expt_phase_t dyno_sweep_phases[] = {
-    { .ctrl_mode = RECT_CTRL_OMEGA, .setpoint = 2000,
-      .ramp_ms   = 5000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 5000,
-      .pt_mode   = VESC_MODE_CLIMB,  .label = "ramp 0-2k" },
-
-    { .ctrl_mode = RECT_CTRL_OMEGA, .setpoint = 4000,
-      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 10000,
-      .pt_mode   = VESC_MODE_CLIMB,  .label = "hold 4k" },
-
-    { .ctrl_mode = RECT_CTRL_OMEGA, .setpoint = 6000,
-      .ramp_ms   = 3000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 10000,
-      .pt_mode   = VESC_MODE_CRUISE, .label = "hold 6k" },
-
-    { .ctrl_mode = RECT_CTRL_OMEGA, .setpoint = 0,
-      .ramp_ms   = 5000, .hold_type = EXPT_HOLD_TIME, .hold_ms = 1000,
-      .pt_mode   = VESC_MODE_IDLE,   .label = "spindown" },
-};
-const expt_profile_t dyno_sweep_profile = {
-    .name     = "dyno_sweep",
-    .phases   = dyno_sweep_phases,
-    .n_phases = (uint8_t)(sizeof(dyno_sweep_phases) / sizeof(dyno_sweep_phases[0])),
     .loop     = false,
 };

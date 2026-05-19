@@ -52,6 +52,12 @@ void pt_set_motor_type(vesc_motor_type_t type) {
     osMutexRelease(g_pt_mtx);
 }
 
+void pt_set_invert_direction(bool invert) {
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    g_pt.rect_invert_direction = invert;
+    osMutexRelease(g_pt_mtx);
+}
+
 void pt_set_fault(uint16_t mask) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
     g_pt.fault_bits |= mask;

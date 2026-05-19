@@ -81,6 +81,19 @@ void vesc_proto_encode_motor_type_cmd(const vesc_motor_type_cmd_t *in, can_frame
     out->data[7] = vesc_crc8(out->data, 7);
 }
 
+void vesc_proto_encode_invert_dir_cmd(const vesc_invert_dir_cmd_t *in, can_frame_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->id  = VESC_ID_SEND_INVERT_DIR_CMD;
+    out->ext = 0;
+    out->rtr = 0;
+    out->dlc = 8;
+    out->data[0] = in->invert_direction ? 1u : 0u;
+    out->data[1] = (uint8_t)in->mode;
+    out->data[2] = in->seq;
+    /* bytes 3..6 reserved, already zero */
+    out->data[7] = vesc_crc8(out->data, 7);
+}
+
 vesc_decode_t vesc_proto_decode_rect_state_concise(const can_frame_t *in,
                                                    vesc_rect_state_t *out) {
     if (in->id != VESC_ID_GET_RECT_STATE_CONCISE) return VESC_DECODE_BAD_ID;

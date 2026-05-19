@@ -40,6 +40,11 @@ typedef struct {
      * is harmless. Default = FOC for normal regen operation. */
     vesc_motor_type_t rect_motor_type;
 
+    /* Invert-direction command — drives 0x105 SendInvertDirCmd. Same TX
+     * pattern as motor_type. Use to compensate for the BLDC vs FOC
+     * direction-convention flip in VESC when handing off between modes. */
+    bool              rect_invert_direction;
+
     /* Telemetry — rectifier_task → readers */
     vesc_rect_state_t rect_state;
     uint32_t          rect_state_tick;
@@ -93,6 +98,7 @@ typedef struct {
     const char       *expt_label;
     bool              expt_advance_req;
     bool              expt_abort_req;
+    bool              expt_start_req;        /* set true to start the boot profile */
 } powertrain_state_t;
 
 
@@ -113,6 +119,11 @@ void     pt_set_setpoint_duty (int16_t duty_cmd_x10000,  vesc_mode_t mode);
 /* Motor-type command — independent of setpoint. The next 0x104 frame TX
  * carries this value. Idempotent on the VESC side (dedups before re-init). */
 void     pt_set_motor_type    (vesc_motor_type_t type);
+
+/* Invert-direction command — independent of setpoint. The next 0x105 frame
+ * TX carries this value. Idempotent on the VESC side (dedups before re-init).
+ * Use to compensate for the BLDC<->FOC direction-convention flip in VESC. */
+void     pt_set_invert_direction(bool invert);
 
 void     pt_set_fault(uint16_t mask);
 void     pt_clear_fault(uint16_t mask);

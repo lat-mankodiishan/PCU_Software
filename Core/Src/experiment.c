@@ -1,8 +1,16 @@
 #include "experiment.h"
 #include "powertrain_state.h"
 #include "cmsis_os2.h"
+#include "main.h"
+#include "stm32f4xx_hal.h"
 
 #define EXPT_TICK_MS  10        /* 100 Hz update during ramps and waits */
+
+/* Aux GPIO controlled per-phase via expt_phase_t.aux_gpio. Configure
+ * this pin as GPIO_Output in CubeMX (.ioc). If you change the port,
+ * adjust both the port macro and ensure CubeMX has the new pin set up. */
+#define EXPT_AUX_GPIO_PORT   GPIOA
+#define EXPT_AUX_GPIO_PIN    GPIO_PIN_3
 
 /* ---- g_pt accessors ---------------------------------------------------- */
 
@@ -72,10 +80,31 @@ static void run_phase(const expt_phase_t *p, uint8_t idx) {
      * for the round-trip. PCU TXes 0x104 every 5 ms tick; 50 ms is
      * comfortably more than the worst-case re-init latency. */
     switch (p->motor_type) {
-    case EXPT_MOTOR_TYPE_BLDC: pt_set_motor_type(VESC_MOTOR_TYPE_BLDC); osDelay(50); break;
-    case EXPT_MOTOR_TYPE_DC:   pt_set_motor_type(VESC_MOTOR_TYPE_DC);   osDelay(50); break;
-    case EXPT_MOTOR_TYPE_FOC:  pt_set_motor_type(VESC_MOTOR_TYPE_FOC);  osDelay(50); break;
+    case EXPT_MOTOR_TYPE_BLDC: pt_set_motor_type(VESC_MOTOR_TYPE_BLDC); osDelay(20); break;
+    case EXPT_MOTOR_TYPE_DC:   pt_set_motor_type(VESC_MOTOR_TYPE_DC);   osDelay(20); break;
+    case EXPT_MOTOR_TYPE_FOC:  pt_set_motor_type(VESC_MOTOR_TYPE_FOC);  osDelay(20); break;
     case EXPT_MOTOR_TYPE_KEEP:
+    default: break;
+    }
+
+    /* Invert-direction change — bundled with motor_type for the BLDC<->FOC
+     * direction-convention hand-off. Same reconfig wait pattern. */
+    switch (p->invert_dir) {
+    case EXPT_INVERT_DIR_NORMAL:   pt_set_invert_direction(false); osDelay(20); break;
+    case EXPT_INVERT_DIR_INVERTED: pt_set_invert_direction(true);  osDelay(20); break;
+    case EXPT_INVERT_DIR_KEEP:
+    default: break;
+    }
+
+    /* Aux GPIO drive — single-write, no settle needed. */
+    switch (p->aux_gpio) {
+    case EXPT_AUX_GPIO_HIGH:
+        HAL_GPIO_WritePin(EXPT_AUX_GPIO_PORT, EXPT_AUX_GPIO_PIN, GPIO_PIN_SET);
+        break;
+    case EXPT_AUX_GPIO_LOW:
+        HAL_GPIO_WritePin(EXPT_AUX_GPIO_PORT, EXPT_AUX_GPIO_PIN, GPIO_PIN_RESET);
+        break;
+    case EXPT_AUX_GPIO_KEEP:
     default: break;
     }
 
@@ -140,8 +169,10 @@ void expt_run(const expt_profile_t *profile) {
         }
     } while (profile->loop && !peek_abort());
 
-    /* Safe idle on completion / abort. */
+    /* Safe idle on completion / abort. Also drive aux GPIO LOW so any
+     * external "test active" indicator clears. */
     pt_set_setpoint(0, VESC_MODE_IDLE);
+    HAL_GPIO_WritePin(EXPT_AUX_GPIO_PORT, EXPT_AUX_GPIO_PIN, GPIO_PIN_RESET);
     mark_state(false, 0, NULL);
 }
 

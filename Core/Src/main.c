@@ -22,7 +22,6 @@
 #include "can.h"
 #include "dac.h"
 #include "fatfs.h"
-#include "i2c.h"
 #include "iwdg.h"
 #include "spi.h"
 #include "tim.h"
@@ -98,13 +97,12 @@ int main(void)
   MX_CAN1_Init();
   MX_CAN2_Init();
   MX_DAC_Init();
-  MX_I2C1_Init();
   MX_SPI1_Init();
   MX_SPI2_Init();
   MX_SPI3_Init();
   MX_TIM1_Init();
   MX_FATFS_Init();
-  // MX_IWDG_Init();  /* Disabled for rectifier-link bring-up — re-enable when supervisor_task is back. */
+  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
   #if defined(DEBUG)
   // __HAL_DBGMCU_FREEZE_IWDG();

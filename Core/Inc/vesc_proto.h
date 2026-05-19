@@ -17,6 +17,9 @@
 #ifndef VESC_ID_SEND_MOTOR_TYPE_CMD
 #define VESC_ID_SEND_MOTOR_TYPE_CMD     0x104u
 #endif
+#ifndef VESC_ID_SEND_INVERT_DIR_CMD
+#define VESC_ID_SEND_INVERT_DIR_CMD     0x105u
+#endif
 #ifndef VESC_ID_GET_RECT_STATE_CONCISE
 #define VESC_ID_GET_RECT_STATE_CONCISE  0x201u
 #endif
@@ -73,6 +76,12 @@ typedef struct {
 } vesc_motor_type_cmd_t;
 
 typedef struct {
+    bool        invert_direction;  /* false = normal, true = inverted */
+    vesc_mode_t mode;
+    uint8_t     seq;
+} vesc_invert_dir_cmd_t;
+
+typedef struct {
     uint16_t V_dc_cV;              /* 0.01 V/LSB, unsigned, 0..655.35 V */
     int16_t  I_dc_cA;              /* 0.01 A/LSB, signed */
     uint16_t gen_rpm;              /* 1 rpm/LSB */
@@ -93,6 +102,7 @@ void          vesc_proto_encode_curr_dem      (const vesc_curr_dem_t       *in, 
 void          vesc_proto_encode_omega_dem     (const vesc_omega_dem_t      *in, can_frame_t *out);
 void          vesc_proto_encode_duty_dem      (const vesc_duty_dem_t       *in, can_frame_t *out);
 void          vesc_proto_encode_motor_type_cmd(const vesc_motor_type_cmd_t *in, can_frame_t *out);
+void          vesc_proto_encode_invert_dir_cmd(const vesc_invert_dir_cmd_t *in, can_frame_t *out);
 
 vesc_decode_t vesc_proto_decode_rect_state_concise(const can_frame_t *in,
                                                    vesc_rect_state_t *out);
