@@ -1,7 +1,7 @@
 /*
  * dyno_setup_task.c — SSD-250A current sensor subscriber for dyno bench tests.
  *
- * Connects to ID 5FX-3 SSD-250A on CAN1 (CAN_BUS_AVIONICS). The SSD broadcasts
+ * Connects to ID 5FX-3 SSD-250A on CAN1 (CAN_BUS_DRONECAN). The SSD broadcasts
  * native CAN 2.0B standard frames at IDs 0x5F1..0x5F7 — we subscribe via the
  * can_manager and drain the queue at 50 Hz, mirroring ecu_task's structure.
  *
@@ -70,7 +70,7 @@
  * broadcast once per sweep). */
 #define SSD_READING_DELAY_MS   100u
 
-#define DYNO_BUS               CAN_BUS_AVIONICS
+#define DYNO_BUS               CAN_BUS_DRONECAN
 
 static StaticTask_t       s_tcb;
 static StackType_t        s_stack[256];          /* 1 KB */

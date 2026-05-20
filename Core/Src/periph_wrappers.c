@@ -6,10 +6,31 @@
 
 static CAN_HandleTypeDef *handle_of(can_bus_t bus) {
     switch (bus) {
-    case CAN_BUS_AVIONICS:   return &hcan1;
-    case CAN_BUS_POWERTRAIN: return &hcan2;
+    case CAN_BUS_DRONECAN: return &hcan1;
+    case CAN_BUS_ENGINE:   return &hcan2;
     default:               return 0;
     }
+}
+
+/* DEBUG: live snapshot of CAN1 error/status registers. Watch in VS Code
+ * Live Expressions to diagnose bus-off / error-passive / no-ACK issues. */
+volatile uint32_t g_can1_esr        = 0;   /* full ESR register */
+volatile uint8_t  g_can1_tec        = 0;   /* TX error counter (ESR bits 23:16) */
+volatile uint8_t  g_can1_rec        = 0;   /* RX error counter (ESR bits 15:8)  */
+volatile uint8_t  g_can1_boff       = 0;   /* bus-off flag    (ESR bit 2)       */
+volatile uint8_t  g_can1_epvf       = 0;   /* error-passive   (ESR bit 1)       */
+volatile uint8_t  g_can1_ewgf       = 0;   /* error-warning   (ESR bit 0)       */
+volatile uint32_t g_can1_tx_post_ok = 0;   /* HAL_CAN_AddTxMessage successes    */
+volatile uint32_t g_can1_tx_post_no = 0;   /* TX attempts with no free mailbox  */
+
+void can_hw_diag_snapshot(void) {
+    uint32_t esr = hcan1.Instance->ESR;
+    g_can1_esr  = esr;
+    g_can1_tec  = (uint8_t)((esr >> 16) & 0xFF);
+    g_can1_rec  = (uint8_t)((esr >>  8) & 0xFF);
+    g_can1_boff = (uint8_t)((esr >>  2) & 0x01);
+    g_can1_epvf = (uint8_t)((esr >>  1) & 0x01);
+    g_can1_ewgf = (uint8_t)( esr        & 0x01);
 }
 
 void can_hw_init(can_bus_t bus) {
@@ -25,7 +46,10 @@ void can_hw_init(can_bus_t bus) {
 
 bool can_hw_try_post(can_bus_t bus, const can_frame_t *f) {
     CAN_HandleTypeDef *h = handle_of(bus);
-    if (HAL_CAN_GetTxMailboxesFreeLevel(h) == 0) return false;
+    if (HAL_CAN_GetTxMailboxesFreeLevel(h) == 0) {
+        if (bus == CAN_BUS_DRONECAN) g_can1_tx_post_no++;
+        return false;
+    }
 
     CAN_TxHeaderTypeDef hdr = {0};
     if (f->ext) { hdr.ExtId = f->id; hdr.IDE = CAN_ID_EXT; }
@@ -35,7 +59,12 @@ bool can_hw_try_post(can_bus_t bus, const can_frame_t *f) {
     hdr.TransmitGlobalTime = DISABLE;
 
     uint32_t mbx;
-    return HAL_CAN_AddTxMessage(h, &hdr, (uint8_t *)f->data, &mbx) == HAL_OK;
+    bool ok = (HAL_CAN_AddTxMessage(h, &hdr, (uint8_t *)f->data, &mbx) == HAL_OK);
+    if (bus == CAN_BUS_DRONECAN) {
+        if (ok) g_can1_tx_post_ok++;
+        else    g_can1_tx_post_no++;
+    }
+    return ok;
 }
 
 uint8_t can_hw_tx_free(can_bus_t bus) {

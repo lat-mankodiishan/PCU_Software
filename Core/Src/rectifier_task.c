@@ -39,7 +39,7 @@ void rectifier_task_start(void) {
                                sizeof(can_frame_t),
                                &qattr);
 
-    can_mgr_subscribe(CAN_BUS_POWERTRAIN,
+    can_mgr_subscribe(CAN_BUS_ENGINE,
                       VESC_ID_GET_RECT_STATE_CONCISE,
                       0x7FFu,                    /* exact-match 11-bit */
                       false,
@@ -131,7 +131,7 @@ static void rectifier_task(void *arg) {
             break;
         }
         }
-        (void)can_mgr_send(CAN_BUS_POWERTRAIN, &tx, 0);
+        (void)can_mgr_send(CAN_BUS_ENGINE, &tx, 0);
 
         /* --- 0x104 SendMotorTypeCmd: on-change + keep-alive ----------- */
         mt_ticks_since_tx++;
@@ -143,7 +143,7 @@ static void rectifier_task(void *arg) {
             };
             can_frame_t mt_tx;
             vesc_proto_encode_motor_type_cmd(&mt_cmd, &mt_tx);
-            (void)can_mgr_send(CAN_BUS_POWERTRAIN, &mt_tx, 0);
+            (void)can_mgr_send(CAN_BUS_ENGINE, &mt_tx, 0);
             prev_mt = mt_now;
             mt_ticks_since_tx = 0;
         }
@@ -158,7 +158,7 @@ static void rectifier_task(void *arg) {
             };
             can_frame_t id_tx;
             vesc_proto_encode_invert_dir_cmd(&id_cmd, &id_tx);
-            (void)can_mgr_send(CAN_BUS_POWERTRAIN, &id_tx, 0);
+            (void)can_mgr_send(CAN_BUS_ENGINE, &id_tx, 0);
             prev_id = id_now;
             id_ticks_since_tx = 0;
         }
