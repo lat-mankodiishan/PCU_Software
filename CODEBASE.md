@@ -613,7 +613,80 @@ FreeRTOS config, pinout. Critical settings:
 
 ---
 
-## 8. Runtime Topology
+## 8. Developer Setup
+
+Both **STM32CubeIDE** and **VS Code** build this project from the same
+CMake configuration (`CMakeLists.txt` + `CMakePresets.json`). IDE-specific
+files (`.cproject`, `.project`, `.settings/`, `.vscode/`, `build/`) are
+intentionally gitignored — each developer generates them locally on first
+import. **Do not share these files outside git** (Google Drive sync, ZIPs,
+emailing `.cproject`, etc.); they contain absolute paths from whichever
+machine they were generated on and will fail to build elsewhere with errors
+like:
+
+```
+CMakeCache.txt directory G:/... is different than the directory
+C:/Users/<other-user>/... where CMakeCache.txt was created.
+```
+
+If you hit that, delete the local `build/` and `.cproject`/`.project`/
+`.settings/` and re-import.
+
+### Prerequisites
+
+| Tool | Required by | Install |
+|------|-------------|---------|
+| **STM32CubeIDE 2.1.0+** | CubeIDE users | [st.com](https://www.st.com/en/development-tools/stm32cubeide.html). Bundles ARM GCC + Ninja. |
+| **CMake 3.22+** | Both (CubeIDE *does not* bundle CMake) | `winget install Kitware.CMake` — must be on PATH. |
+| **Ninja 1.10+** | VS Code users (CubeIDE bundles its own) | `winget install Ninja-build.Ninja` |
+| **GNU Arm Embedded Toolchain** (`arm-none-eabi-gcc`) | VS Code users (CubeIDE bundles its own) | [xpack-dev-tools](https://xpack.github.io/dev-tools/arm-none-eabi-gcc/) or [arm.com](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads). Must be on PATH; `cmake/gcc-arm-none-eabi.cmake` calls `arm-none-eabi-gcc` unqualified. |
+| **ST-LINK driver + tools** | Flashing/debugging | Bundled with CubeIDE; standalone via [st.com](https://www.st.com/en/development-tools/st-link-v2.html). |
+
+After installing CMake/Ninja, **restart the IDE** — IDEs cache the PATH at
+launch time, so installs made while CubeIDE/VS Code is open won't be seen.
+
+### First-time setup — VS Code
+
+1. Install the **CMake Tools** (`ms-vscode.cmake-tools`), **clangd**
+   (`llvm-vs-code-extensions.vscode-clangd`), and **Cortex-Debug**
+   (`marus25.cortex-debug`) extensions.
+2. Open the repo folder.
+3. CMake Tools auto-detects `CMakePresets.json`. From the status bar
+   (or `Ctrl+Shift+P → CMake: Select Configure Preset`) pick **Debug**.
+4. Build with `F7` or the CMake Tools panel's Build button. Output lands
+   in `build/Debug/`.
+5. `compile_commands.json` is exported automatically; clangd picks it up
+   via the `.clangd` file in the repo root.
+
+### First-time setup — STM32CubeIDE
+
+1. **File → Import → Existing STM32CubeMX/CubeIDE project** (or the
+   CMake-project import flow on newer versions); point at the repo root.
+   **Do not copy `.cproject` from another developer's machine** — let
+   CubeIDE generate it locally from the CMake files.
+2. Once imported, **right-click project → Properties → C/C++ Build → Tool
+   Chain Editor** and confirm the toolchain is the bundled ST GNU MCU
+   Tools.
+3. Build with the hammer icon. CubeIDE runs the equivalent of
+   `cmake -S . -B build/Debug -GNinja -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake`
+   then `ninja`.
+
+### Common pitfalls
+
+- **"Cannot run program: cmake"** — CMake not on PATH, or the IDE was
+  launched before CMake was installed. Install CMake, then restart the IDE.
+- **`CMakeCache.txt` directory mismatch** — stale cache from a different
+  machine. Delete `build/`.
+- **Stale `.cproject` source path** — a `.cproject` was copied from another
+  machine. Delete `.cproject`, `.project`, `.settings/`, and re-import.
+- **Google Drive / OneDrive sync clobbering build artifacts** — clone the
+  repo to a *local* path (e.g. `C:\dev\PCU_Software`), not under a cloud
+  sync mount. Cloud sync of `.metadata/` or `build/` between machines is
+  the root cause of most of the bullets above.
+
+---
+
+## 9. Runtime Topology
 
 ```
                        (CAN1, 1 Mbps DroneCAN)
@@ -664,7 +737,7 @@ FreeRTOS config, pinout. Critical settings:
 
 ---
 
-## 9. What's Remaining
+## 10. What's Remaining
 
 ### Tier 1 — done
 
