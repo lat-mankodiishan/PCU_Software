@@ -1,4 +1,5 @@
 #include "sensor_task.h"
+#include "powertrain_state.h"
 #include "main.h"               /* ADC_DRDY_Pin */
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
@@ -15,14 +16,42 @@ static StaticSemaphore_t s_mtx_cb;
 static osMutexId_t       s_mtx;
 static sensor_data_t     s_data;
 
-/* Default channel config — generic AIN0..AIN3 vs AINCOM, unity gain.
- * Override `scale` / `offset` per channel once the front-end signal
- * conditioning is known (V_bus divider, current-shunt amp, etc.). */
+/* --- ACS772ECB-300B current sensor calibration ---------------------------
+ * Three sensors on AIN0/AIN1/AIN2 vs AINCOM. AINCOM must be bodged to GND
+ * on the PCB (datasheet pin can't be routed to AVSS via INPMUX, must be
+ * a physical connection). With AINN=GND, single-ended swing is 0.5..4.5 V
+ * — exceeds the PGA's ±2.5 V range at gain 1 + internal VREF, so each
+ * channel runs with PGA bypassed and the reference comes from AVDD/AVSS
+ * (REFMUX = 0x24 in ADC_Init). Differential range becomes ±5 V.
+ *
+ * Math (per channel):
+ *   V_out_V  = raw * (VREF / 2^31)            with VREF = AVDD ≈ 5 V
+ *   I_A      = (V_out_V - V_quiescent) / sensitivity
+ *   V_quiescent  = Vcc/2 = 2.5 V (ratiometric to ACS772 supply, 5 V)
+ *   sensitivity  = 6.66 mV/A = 0.00666 V/A
+ *
+ *   I_mA = raw * SCALE_MA + OFFSET_MA
+ *     SCALE_MA  = (5.0 / 2^31) / 0.00666 * 1000  ≈ 3.4956e-4 mA/LSB
+ *     OFFSET_MA = -2.5 / 0.00666 * 1000          ≈ -375 375 mA
+ *
+ * To calibrate per-sensor offset drift on the bench: run with no current,
+ * read raw values from Live Watch (g_pt.current_sensor_mA[i] near 0 mA),
+ * and tune .offset per channel until each channel reads zero. Sensitivity
+ * (.scale) is fixed by the part — do NOT adjust .scale unless you've
+ * verified a non-nominal sensitivity. */
+#define ACS772_SCALE_MA   (5.0f / 2147483648.0f / 0.00666f * 1000.0f)   /* mA per ADC LSB */
+#define ACS772_OFFSET_MA  (-2.5f / 0.00666f * 1000.0f)                  /* mA at raw = 0  */
+
 static const ADC_ChannelConfig_t s_ch_cfg[SENSOR_NUM_ADC_CH] = {
-    { .muxp = ADC_AIN0, .muxn = ADC_AINCOM, .gain = ADC_GAIN_1, .scale = 1.0f, .offset = 0.0f },
-    { .muxp = ADC_AIN1, .muxn = ADC_AINCOM, .gain = ADC_GAIN_1, .scale = 1.0f, .offset = 0.0f },
-    { .muxp = ADC_AIN2, .muxn = ADC_AINCOM, .gain = ADC_GAIN_1, .scale = 1.0f, .offset = 0.0f },
-    { .muxp = ADC_AIN3, .muxn = ADC_AINCOM, .gain = ADC_GAIN_1, .scale = 1.0f, .offset = 0.0f },
+    /* I_1 — ACS772 #1 on AIN0 */
+    { .muxp = ADC_AIN0, .muxn = ADC_AINCOM, .gain = ADC_GAIN_1, .pga_bypass = true,
+      .scale = ACS772_SCALE_MA, .offset = ACS772_OFFSET_MA },
+    /* I_2 — ACS772 #2 on AIN1 */
+    { .muxp = ADC_AIN1, .muxn = ADC_AINCOM, .gain = ADC_GAIN_1, .pga_bypass = true,
+      .scale = ACS772_SCALE_MA, .offset = ACS772_OFFSET_MA },
+    /* I_3 — ACS772 #3 on AIN2 */
+    { .muxp = ADC_AIN2, .muxn = ADC_AINCOM, .gain = ADC_GAIN_1, .pga_bypass = true,
+      .scale = ACS772_SCALE_MA, .offset = ACS772_OFFSET_MA },
 };
 
 static void sensor_task(void *arg);
@@ -71,6 +100,17 @@ static void sensor_task(void *arg) {
                 osMutexAcquire(s_mtx, osWaitForever);
                 s_data.adc = scan;
                 osMutexRelease(s_mtx);
+
+                /* Mirror current sensor channels into g_pt for consumers
+                 * (log_task, supervisor, expt). ACS772 raw → mA conversion
+                 * already done in ADC_ConverttoEngUnit via the per-channel
+                 * scale/offset; cast float → int32 for the g_pt fields. */
+                osMutexAcquire(g_pt_mtx, osWaitForever);
+                for (uint8_t i = 0; i < SENSOR_NUM_ADC_CH && i < 3; ++i) {
+                    g_pt.current_sensor_mA[i] = (int32_t)scan.ch[i].value;
+                }
+                g_pt.current_sensor_tick = osKernelGetTickCount();
+                osMutexRelease(g_pt_mtx);
             }
         }
 

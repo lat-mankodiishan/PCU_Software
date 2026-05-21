@@ -24,11 +24,10 @@
 
 #include "throttle_ctrl_task.h"
 #include "powertrain_state.h"
-#include "tim.h"
+#include "periph_wrappers.h"
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
 #include "task.h"
-#include "stm32f4xx_hal.h"
 #include <stdint.h>
 
 #define LOOP_PERIOD_MS    10        /* 100 Hz tick */
@@ -87,7 +86,7 @@ static void throttle_task(void *arg);
 static inline void pwm_set_pulse(uint16_t pulse_us) {
     if (pulse_us < ESC_MIN_US) pulse_us = ESC_MIN_US;
     if (pulse_us > ESC_MAX_US) pulse_us = ESC_MAX_US;
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pulse_us);
+    esc_hw_set_us(ESC_CH_LOAD, pulse_us);
 }
 
 /* One step of the moving average — O(1) sliding window with modulo wrap. */
@@ -108,9 +107,8 @@ static void pid_reset(void) {
 /* ----------------------------------------------------------------------- */
 
 void throttle_ctrl_task_start(void) {
-    /* Park CCR at the ESC idle pulse BEFORE starting the channel. */
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, ESC_MIN_US);
-    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+    /* Park CCR at the ESC idle pulse and start the channel. */
+    esc_hw_init(ESC_CH_LOAD, ESC_MIN_US);
 
     static const osThreadAttr_t tattr = {
         .name       = "throttle",

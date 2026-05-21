@@ -49,4 +49,20 @@ void led_hw_toggle(void);
  * read). Watch g_can1_tec / g_can1_boff / g_can1_epvf in the debugger. */
 void can_hw_diag_snapshot(void);
 
+/* ---- ESC / servo PWM on TIM1 ----------------------------------------
+ * Both channels share TIM1's prescaler/period (1 µs/tick, 20 ms period
+ * → 50 Hz). CCR value writes the pulse width in microseconds directly.
+ * Set CCR once and TIM1 hardware regenerates the pulse each frame; no
+ * refresh task is needed. */
+typedef enum {
+    ESC_CH_ENGINE = 0,    /* TIM1_CH1 / PA8  — engine throttle servo (1100..1900 µs) */
+    ESC_CH_LOAD   = 1,    /* TIM1_CH3 / PA10 — load ESC, Hobbywing 200A (1000..2000 µs) */
+} esc_channel_t;
+
+/* Park CCR at idle_us, then start the channel. Idempotent. */
+void esc_hw_init   (esc_channel_t ch, uint16_t idle_us);
+
+/* Write a new pulse width to the channel. Caller owns clamping. */
+void esc_hw_set_us (esc_channel_t ch, uint16_t pulse_us);
+
 #endif /* PERIPH_WRAPPERS_H */

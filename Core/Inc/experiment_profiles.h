@@ -9,4 +9,10 @@
  * See experiment_profiles.c for the phase table. */
 extern const expt_profile_t starter_gen_profile;
 
+/* Engine throttle sweep: BLDC 42 % crank (PA7-switch advance), then FOC
+ * inverted at 60 % duty for 10 s, then 75 % duty for 100 s. Operator
+ * varies power by changing engine throttle during each fixed-duty hold.
+ * See experiment_profiles.c for the phase table. */
+extern const expt_profile_t engine_throttle_sweep_profile;
+
 #endif /* EXPERIMENT_PROFILES_H */

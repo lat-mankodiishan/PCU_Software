@@ -1,0 +1,139 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // Primary debug config: flash + run + symbols + Live Watch + FreeRTOS-aware threads.
+            // Uses ST's stlinkgdbtarget extension (STM32Cube IDE for VS Code).
+            "name": "STM32Cube: ST-Link GDB Server (Launch)",
+            "type": "stlinkgdbtarget",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+
+            // Build the active CMake target before launching. Comment out to skip.
+            "preBuild": "${command:st-stm32-ide-debug-launch.build}",
+
+            // Reset the PCU when Stop Debug is clicked — guarantees the
+            // experiment_task / motor / engine don't keep running after the
+            // debugger detaches. See .vscode/tasks.json "reset-stm32".
+            "postDebugTask": "reset-stm32",
+
+            // ELF for both flashing and symbols.
+            "imagesAndSymbols": [
+                {
+                    "imageFileName":  "${workspaceFolder}/build/Debug/Software_Hybrid.elf",
+                    "symbolFileName": "${workspaceFolder}/build/Debug/Software_Hybrid.elf"
+                }
+            ],
+
+            "runEntry": "main",
+
+            // Device + register view (SVD lets you inspect peripherals in the side panel).
+            "deviceName": "STM32F405RG",
+            "deviceCore": "Cortex-M4",
+            "svdPath": "${env:LOCALAPPDATA}/stm32cube/packs/STMicroelectronics/stm32f4xx_dfp/1.2.0/SVD/STM32F405.svd",
+
+            // GDB client behaviour.
+            "gdbAsync": true,
+            "gdbNonStop": false,
+            "openGdbConsole": false,
+            "verbose": false,
+            "logFile": "${workspaceFolder}/build/gdbClient_log.txt",
+
+            // CPU fault traps. Halts on div-by-zero and on any escalated exception.
+            "faultDivByZero": true,
+            "faultUnalignedAccess": false,
+            "faultHaltOnException": true,
+
+            // Non-intrusive memory poller for the STM32 Live Watch panel.
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": "4"
+            },
+
+            // ST-Link GDB Server settings (extension auto-resolves serverExe and serverCubeProgPath
+            // from CUBE_BUNDLE_PATH; override only if you need a non-default version).
+            "serverHost": "localhost",
+            "serverPort": "61234",
+            "serverInterface": "SWD",
+            "serverInterfaceFrequency": "Auto",
+            "serverVerify": true,
+            "serverIncrementalFlashing": false,
+            "serverShared": false,
+            "serverHaltAllCores": false,
+            "serverLogFile": "${workspaceFolder}/build/stlinkgdbserver_log.txt",
+            "automaticallyKillServer": true,
+
+            // FreeRTOS thread-aware debug via ST's RTOS proxy.
+            // STM32F405 = Cortex-M4 + FPU → driverPort ARM_CM4F.
+            "serverRtos": {
+                "enabled": false,
+                "driver": "freertos",
+                "driverPort": "ARM_CM4F",
+                "port": "60000"
+            },
+
+            // Semihosting off by default (your firmware uses ITM/UART, not semihosting printf).
+            "serverSemihosting": {
+                "enabled": false,
+                "mode": "console",
+                "port": "61260"
+            }
+        },
+
+        {
+            // Attach to a target that's already powered and flashed. No build, no flash.
+            // Useful for live debugging an already-deployed image without resetting.
+            "name": "STM32Cube: ST-Link GDB Server (Attach)",
+            "type": "stlinkgdbtarget",
+            "request": "attach",
+            "cwd": "${workspaceFolder}",
+            "postDebugTask": "reset-stm32",
+            "imagesAndSymbols": [
+                { "symbolFileName": "${workspaceFolder}/build/Debug/Software_Hybrid.elf" }
+            ],
+            "deviceName": "STM32F405RG",
+            "deviceCore": "Cortex-M4",
+            "svdPath": "${env:LOCALAPPDATA}/stm32cube/packs/STMicroelectronics/stm32f4xx_dfp/1.2.0/SVD/STM32F405.svd",
+            "gdbAsync": true,
+            "gdbNonStop": false,
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": "4"
+            },
+            "serverHost": "localhost",
+            "serverPort": "61234",
+            "serverRtos": {
+                "enabled": false,
+                "driver": "freertos",
+                "driverPort": "ARM_CM4F",
+                "port": "60000"
+            }
+        },
+
+        {
+            // Kept around for SWO/ITM printf streaming, which stlinkgdbtarget doesn't expose.
+            // No "rtos" field — ST-Link GDB Server doesn't support Cortex-Debug's RTOS option.
+            "name": "Cortex-Debug: ST-Link with SWO/ITM",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/Software_Hybrid.elf",
+            "servertype": "stlink",
+            "device": "STM32F405RG",
+            "interface": "swd",
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "none",
+            "svdFile": "${env:LOCALAPPDATA}/stm32cube/packs/STMicroelectronics/stm32f4xx_dfp/1.2.0/SVD/STM32F405.svd",
+            "swoConfig": {
+                // HCLK on this firmware = 60 MHz (HSE 24 MHz · PLLN 80 / PLLP 2 / AHB_DIV 2).
+                "enabled": true,
+                "cpuFrequency": 60000000,
+                "swoFrequency": 2000000,
+                "source": "probe",
+                "decoders": [
+                    { "type": "console", "label": "ITM", "port": 0 }
+                ]
+            }
+        }
+    ]
+}

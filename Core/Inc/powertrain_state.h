@@ -12,6 +12,12 @@
 #define OMEGA_E_MAX_ERPM       100000      /* 100k electrical RPM */
 #define DUTY_MAX_X10000          9500      /* 95.00 % duty       */
 
+/* Engine throttle servo (TIM1_CH1 / PA8). 1100 µs = 0 % (idle), 1900 µs
+ * = 100 % (max). Standard 50 Hz servo signal; ECU's onboard governor
+ * smooths command-to-rpm. Linear mapping done in pt_set_engine_throttle_*. */
+#define ENGINE_THROTTLE_PULSE_MIN_US   1100u
+#define ENGINE_THROTTLE_PULSE_MAX_US   1900u
+
 /* Aggregated fault bits — OR'd from all detector tasks.
  * supervisor_task reads this each tick and decides actuator state. */
 typedef enum {
@@ -107,6 +113,21 @@ typedef struct {
     int32_t           throttle_src_filt_mA;    /* 5FX after N-tap moving avg     */
     uint32_t          throttle_ctrl_tick;      /* last loop iteration timestamp  */
 
+    /* Engine throttle servo (PA8 / TIM1_CH1) — written by
+     * pt_set_engine_throttle_pct_x100(). 1100..1900 µs mapped from 0..10000
+     * (0.01 % LSB). Hardware CCR is updated inside the same setter via
+     * esc_hw_set_us(); the g_pt fields here exist for telemetry and logging. */
+    uint16_t          engine_throttle_pct_x100;    /* 0..10000 = 0..100.00 % */
+    uint16_t          engine_throttle_pulse_us;    /* 1100..1900 µs, mirror of CCR1 */
+    uint32_t          engine_throttle_tick;        /* last setter call timestamp */
+
+    /* Onboard current sensors (ACS772ECB-300B, ±300 A, 6.66 mV/A) wired to
+     * ADS1262 AIN0/AIN1/AIN2 vs AINCOM. Written by sensor_task after each
+     * full ADC scan. mA values are signed; bidirectional sensor convention
+     * (sign matches the sensor's IP+/IP- pin labeling on the PCB). */
+    int32_t           current_sensor_mA[3];        /* I_1, I_2, I_3 in 1 mA LSB, signed */
+    uint32_t          current_sensor_tick;         /* osKernelGetTickCount of last scan */
+
     /* Experiment runner state — written by experiment.c, read by supervisor
      * (gates the I_bat closed-loop) and log_task. expt_label points into
      * static-const profile data, so it lives as long as the firmware does.
@@ -143,6 +164,11 @@ void     pt_set_motor_type    (vesc_motor_type_t type);
  * TX carries this value. Idempotent on the VESC side (dedups before re-init).
  * Use to compensate for the BLDC<->FOC direction-convention flip in VESC. */
 void     pt_set_invert_direction(bool invert);
+
+/* Engine throttle servo setter. Argument is 0..10000 (0.01 % LSB); clamped
+ * to that range. Computes the corresponding 1100..1900 µs pulse, mirrors
+ * to g_pt for telemetry, and updates the TIM1_CH1 CCR via esc_hw_set_us. */
+void     pt_set_engine_throttle_pct_x100(uint16_t pct_x100);
 
 void     pt_set_fault(uint16_t mask);
 void     pt_clear_fault(uint16_t mask);

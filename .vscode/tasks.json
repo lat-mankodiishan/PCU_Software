@@ -1,0 +1,33 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            // Hardware reset of the PCU via ST-Link in hotplug mode. Wired into
+            // launch.json `postDebugTask`, so every Stop Debug forces the chip
+            // back to its reset vector. This is the safety net for the case
+            // where the experiment_task is mid-run when the user stops debug —
+            // without it, the firmware (and the engine) keeps running after
+            // the debugger detaches.
+            //
+            // mode=HOTPLUG: connect without halting/resetting on connect.
+            // -rst: issue a software reset; target runs afterwards because
+            //       hotplug didn't halt it. End state: chip back at main().
+            "label": "reset-stm32",
+            "type": "shell",
+            "command": "${env:LOCALAPPDATA}/stm32cube/bundles/programmer/2.22.0+st.1/bin/STM32_Programmer_CLI.exe",
+            "args": [
+                "-c", "port=SWD", "mode=HOTPLUG",
+                "-rst",
+                "-q"
+            ],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true,
+                "close": true
+            },
+            "problemMatcher": []
+        }
+    ]
+}

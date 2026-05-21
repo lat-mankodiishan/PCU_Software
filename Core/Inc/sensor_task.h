@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #define SENSOR_NUM_TC      3
-#define SENSOR_NUM_ADC_CH  4
+#define SENSOR_NUM_ADC_CH  3       /* AIN0..AIN2 = ACS772 I_1..I_3 (single-ended vs AINCOM-bodged-to-GND) */
 
 typedef struct {
     ADC_ScanResult_t adc;

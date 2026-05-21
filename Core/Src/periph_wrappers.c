@@ -1,6 +1,7 @@
 #include "periph_wrappers.h"
 #include "can.h"
 #include "iwdg.h"
+#include "tim.h"
 #include "stm32f4xx_hal.h"
 #include "main.h"
 
@@ -126,4 +127,24 @@ void watchdog_refresh(void) {
 
 void led_hw_toggle(void) {
     HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+}
+
+/* ---- ESC / servo PWM on TIM1 ---------------------------------------- */
+
+static uint32_t esc_hal_channel(esc_channel_t ch) {
+    switch (ch) {
+    case ESC_CH_ENGINE: return TIM_CHANNEL_1;
+    case ESC_CH_LOAD:   return TIM_CHANNEL_3;
+    default:            return TIM_CHANNEL_1;
+    }
+}
+
+void esc_hw_init(esc_channel_t ch, uint16_t idle_us) {
+    const uint32_t hal_ch = esc_hal_channel(ch);
+    __HAL_TIM_SET_COMPARE(&htim1, hal_ch, idle_us);
+    HAL_TIM_PWM_Start(&htim1, hal_ch);
+}
+
+void esc_hw_set_us(esc_channel_t ch, uint16_t pulse_us) {
+    __HAL_TIM_SET_COMPARE(&htim1, esc_hal_channel(ch), pulse_us);
 }

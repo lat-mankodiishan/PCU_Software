@@ -147,8 +147,9 @@ typedef enum {
 typedef struct {
 	ADC_Input_t     muxp;
 	ADC_Input_t     muxn;
-	ADC_Gain_t  gain;
-	float           scale;
+	ADC_Gain_t      gain;        /* ignored when pga_bypass == true                  */
+	bool            pga_bypass;  /* true → MODE2.BYPASS=1, signal skips PGA          */
+	float           scale;       /* raw → engineering: value = raw * scale + offset  */
 	float           offset;
 } ADC_ChannelConfig_t;
 

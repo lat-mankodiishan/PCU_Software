@@ -1,4 +1,5 @@
 #include "powertrain_state.h"
+#include "periph_wrappers.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include <string.h>
@@ -12,6 +13,7 @@ void pt_init(void) {
     memset(&g_pt, 0, sizeof(g_pt));
     g_pt.mode            = VESC_MODE_IDLE;
     g_pt.rect_motor_type = VESC_MOTOR_TYPE_FOC;     /* steady-state default */
+    g_pt.engine_throttle_pulse_us = ENGINE_THROTTLE_PULSE_MIN_US;
 
     static const osMutexAttr_t attr = {
         .name      = "g_pt_mtx",
@@ -20,6 +22,10 @@ void pt_init(void) {
         .cb_size   = sizeof(s_pt_mtx_cb),
     };
     g_pt_mtx = osMutexNew(&attr);
+
+    /* Park the engine throttle ESC at 0 % (1100 µs) before any setter can
+     * fire. Safe-idle on boot — the engine sees the servo at min position. */
+    esc_hw_init(ESC_CH_ENGINE, ENGINE_THROTTLE_PULSE_MIN_US);
 }
 
 void pt_set_setpoint(int16_t I_rect_cmd_cA, vesc_mode_t mode) {
@@ -56,6 +62,22 @@ void pt_set_invert_direction(bool invert) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
     g_pt.rect_invert_direction = invert;
     osMutexRelease(g_pt_mtx);
+}
+
+void pt_set_engine_throttle_pct_x100(uint16_t pct_x100) {
+    if (pct_x100 > 10000u) pct_x100 = 10000u;
+
+    const uint16_t span_us  = ENGINE_THROTTLE_PULSE_MAX_US - ENGINE_THROTTLE_PULSE_MIN_US;
+    const uint16_t pulse_us = (uint16_t)(ENGINE_THROTTLE_PULSE_MIN_US
+                              + ((uint32_t)span_us * pct_x100) / 10000u);
+
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    g_pt.engine_throttle_pct_x100 = pct_x100;
+    g_pt.engine_throttle_pulse_us = pulse_us;
+    g_pt.engine_throttle_tick     = osKernelGetTickCount();
+    osMutexRelease(g_pt_mtx);
+
+    esc_hw_set_us(ESC_CH_ENGINE, pulse_us);
 }
 
 void pt_set_fault(uint16_t mask) {

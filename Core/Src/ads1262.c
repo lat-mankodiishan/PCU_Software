@@ -113,6 +113,7 @@ float ADC_ConverttoEngUnit (int32_t raw, uint8_t ch_index){
 void ADC_SetChannel(uint8_t ch_index){
 	uint8_t mux = (channels[ch_index].muxp<<4) | channels[ch_index].muxn;
 	uint8_t mode2 = (channels[ch_index].gain<<4) | stored_sps;
+	if (channels[ch_index].pga_bypass) mode2 |= ADC_MODE2_BYPASS;
 
 	ADC_SetCS(0);
 	ADC_SPIByteTransfer(ADC_CMD_WREG | ADC_REG_MODE2);
@@ -198,7 +199,11 @@ void ADC_Init(const ADC_ChannelConfig_t *ch, uint8_t num_ch, ADC_SPS_t sps, ADC_
 	ADC_WReg(ADC_REG_MODE0, ADC_DELAY_17US << 0);
 	ADC_WReg(ADC_REG_MODE1, (filt << 5));
 	ADC_SetChannel(0);
-	ADC_WReg(ADC_REG_REFMUX, 0x00);
+	/* REFMUX = RMUXP<<3 | RMUXN. 100b/100b = AVDD/AVSS as the reference pair
+	 * → full-scale differential = AVDD (≈ 5 V). Required when measuring
+	 * ratiometric current sensors (ACS772) whose 0.5–4.5 V swing would
+	 * saturate the internal 2.5 V reference. */
+	ADC_WReg(ADC_REG_REFMUX, 0x24);
 	ADC_StartADC();
 }
 
