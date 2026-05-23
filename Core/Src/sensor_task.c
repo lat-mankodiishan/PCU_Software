@@ -66,9 +66,10 @@ void sensor_task_start(void) {
     s_mtx = osMutexNew(&mattr);
     memset(&s_data, 0, sizeof(s_data));
 
-    /* ADC init runs HAL_Delay during reset; safe pre-kernel because TIM6
-     * (HAL timebase) is already ticking. */
-    ADC_Init(s_ch_cfg, SENSOR_NUM_ADC_CH, ADC_SPS_100, ADC_FILT_SINC4);
+    /* ADC_Init is deferred into the task body — it spins on HAL_Delay and
+     * pre-kernel calls have proven flaky on this board (HAL_GetTick stalls
+     * before osKernelStart, even though TIM6 is nominally initialised).
+     * Post-kernel HAL_Delay is reliable. */
 
     static const osThreadAttr_t tattr = {
         .name       = "sensor",
@@ -89,6 +90,13 @@ void sensor_data_get(sensor_data_t *out) {
 
 static void sensor_task(void *arg) {
     (void)arg;
+
+    /* Post-kernel ADC bring-up: HAL_Delay inside ADC_Reset waits on TIM6
+     * ticks, which only fire reliably once the scheduler is running.
+     * Consumers reading sensor_data_get during this ~110 ms see the
+     * zero-initialised s_data — fine for bring-up. */
+    ADC_Init(s_ch_cfg, SENSOR_NUM_ADC_CH, ADC_SPS_100, ADC_FILT_SINC4);
+
     uint32_t next = osKernelGetTickCount();
 
     for (;;) {

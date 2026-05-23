@@ -21,10 +21,12 @@
 #include "cmsis_os.h"
 #include "can.h"
 #include "dac.h"
+#include "dma.h"
 #include "fatfs.h"
 #include "iwdg.h"
 #include "spi.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -94,6 +96,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_CAN1_Init();
   MX_CAN2_Init();
   MX_DAC_Init();
@@ -103,6 +106,7 @@ int main(void)
   MX_TIM1_Init();
   MX_FATFS_Init();
   MX_IWDG_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   #if defined(DEBUG)
   // __HAL_DBGMCU_FREEZE_IWDG();

@@ -40,6 +40,7 @@
 #include "throttle_ctrl_task.h"
 #include "control_law_test.h"
 #include "periph_wrappers.h"
+#include "rtos_stats.h"
 
 /* FATFS_SD timeout counters — decremented in vApplicationTickHook below.
  * Requires configUSE_TICK_HOOK = 1 (set in CubeMX → FreeRTOS → Config). */
@@ -187,7 +188,8 @@ void MX_FREERTOS_Init(void) {
   log_task_start();
   fc_link_task_start();
   // bms_task_start();    /* Phase 1: no BMS connected — re-enable for Phase 3 */
-  // ecu_task_start();
+  ecu_task_start();      /* Loweheiser ECU on USART2 (MegaSquirt 'A' poll) */
+  rtos_stats_task_start();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -206,11 +208,12 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* One-shot PA3 pulse at boot: drive HIGH, hold 1 s, drive LOW.
-   * PA3 is configured as GPIO_Output_PP in CubeMX (see MX_GPIO_Init). */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
+  /* One-shot PC3 pulse at boot: drive HIGH, hold 1 s, drive LOW.
+   * PC3 is configured as GPIO_Output_PP in CubeMX (see MX_GPIO_Init) —
+   * moved off PA3 after PA2/PA3 were reassigned to USART2 TX/RX. */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);
   osDelay(1000);
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET);
 
   /* supervisor_task is now the sole writer of pt_set_setpoint (running
    * the I_bat closed-loop — see USE_IBAT_CONTROL_LAW in supervisor_task.c)

@@ -104,6 +104,18 @@ static void supervisor_task(void *arg) {
          *     opens deferred until BMS / battery fault detection). --- */
         pt_set_contactor_cmds(true, true);
 
+        /* --- Engine throttle live-tune dispatch ---------------------- *
+         * Mirror g_pt.engine_throttle_req_pct_x100 to the TIM1_CH1 CCR
+         * every tick. Lets the operator drive throttle by writing the
+         * req field directly from Live Watch (no GDB function-call
+         * needed). Setter is cheap — internally takes the mutex, clamps,
+         * computes pulse_us, writes CCR1. */
+        uint16_t eng_req;
+        osMutexAcquire(g_pt_mtx, osWaitForever);
+        eng_req = g_pt.engine_throttle_req_pct_x100;
+        osMutexRelease(g_pt_mtx);
+        pt_set_engine_throttle_pct_x100(eng_req);
+
         /* --- Liveness heartbeat -------------------------------------- */
         osMutexAcquire(g_pt_mtx, osWaitForever);
         g_pt.supervisor_heartbeat++;

@@ -67,10 +67,20 @@ typedef struct {
     int8_t            bms_max_cell_C;          /* hottest cell °C */
     uint32_t          bms_input_tick;
 
-    /* ECU — ecu_task writes when frames are parsed */
-    uint16_t          ecu_rpm;                 /* engine RPM */
-    uint16_t          ecu_fuel_rate_dg_s;      /* 0.1 g/s LSB */
-    int16_t           ecu_cht_C;               /* cylinder head temp °C */
+    /* ECU — ecu_task writes when MegaSquirt 'A' polls return cleanly.
+     * All temp fields are whole °C regardless of firmware's CELSIUS macro
+     * (ecu_task does the F→C conversion before mirroring). */
+    uint16_t          ecu_rpm;                 /* engine RPM, 1 RPM/LSB */
+    uint16_t          ecu_inj_pw_us;           /* injector pulse width, 1 µs/LSB (MS2 pulseWidth1) */
+    uint16_t          ecu_fuel_rate_dg_s;      /* 0.1 g/s LSB — TODO: derive from PW × RPM × inj_flow */
+    int16_t           ecu_cht_C;               /* coolant/cylinder-head temp, 1 °C/LSB (MS2 coolant) */
+    int16_t           ecu_iat_C;               /* intake air temp, 1 °C/LSB (MS2 mat) */
+    int16_t           ecu_egt_C;               /* exhaust gas temp probe 1, 1 °C/LSB (MS2 adc6 × 1.222) */
+    int16_t           ecu_tps_pct_x10;         /* throttle position, 0.1 %/LSB (MS2 tps) */
+    int16_t           ecu_map_kPa_x10;         /* manifold absolute pressure, 0.1 kPa/LSB (MS2 map) */
+    int16_t           ecu_batt_cV;             /* ECU's view of supply voltage, 0.01 V/LSB (MS2 batteryVoltage) */
+    uint8_t           ecu_engine_status;       /* MS2 engine byte (ready/crank/warmup/etc. flags) — see ecu_task.c */
+    uint8_t           ecu_sync_err_cnt;        /* MS2 synccnt — trigger sync errors since boot */
     uint32_t          ecu_input_tick;
 
     /* Liveness counter — incremented by supervisor each tick.
@@ -113,11 +123,15 @@ typedef struct {
     int32_t           throttle_src_filt_mA;    /* 5FX after N-tap moving avg     */
     uint32_t          throttle_ctrl_tick;      /* last loop iteration timestamp  */
 
-    /* Engine throttle servo (PA8 / TIM1_CH1) — written by
-     * pt_set_engine_throttle_pct_x100(). 1100..1900 µs mapped from 0..10000
-     * (0.01 % LSB). Hardware CCR is updated inside the same setter via
-     * esc_hw_set_us(); the g_pt fields here exist for telemetry and logging. */
-    uint16_t          engine_throttle_pct_x100;    /* 0..10000 = 0..100.00 % */
+    /* Engine throttle servo (PA8 / TIM1_CH1). Operator writes the
+     * REQUEST field (req_pct_x100) — supervisor picks it up each 10 ms
+     * tick and pushes to hardware via pt_set_engine_throttle_pct_x100().
+     * The setter also updates the other two mirror fields (pct_x100 +
+     * pulse_us) for telemetry. Live-tune from Live Watch: write
+     * engine_throttle_req_pct_x100 = 5000 → servo moves to 50 % within
+     * one supervisor tick. */
+    uint16_t          engine_throttle_req_pct_x100; /* operator setpoint, 0..10000 */
+    uint16_t          engine_throttle_pct_x100;    /* mirror of last applied request */
     uint16_t          engine_throttle_pulse_us;    /* 1100..1900 µs, mirror of CCR1 */
     uint32_t          engine_throttle_tick;        /* last setter call timestamp */
 
@@ -127,6 +141,12 @@ typedef struct {
      * (sign matches the sensor's IP+/IP- pin labeling on the PCB). */
     int32_t           current_sensor_mA[3];        /* I_1, I_2, I_3 in 1 mA LSB, signed */
     uint32_t          current_sensor_tick;         /* osKernelGetTickCount of last scan */
+
+    /* RTOS health — written by rtos_stats_task every ~5 s. Derived from
+     * the IDLE task's runtime counter delta vs the total counter delta.
+     * The full per-task table is dumped over SWO (see rtos_stats.c). */
+    uint8_t           cpu_load_pct;                /* 0..100, last 5-second window */
+    uint32_t          cpu_load_tick;               /* osKernelGetTickCount of last update */
 
     /* Experiment runner state — written by experiment.c, read by supervisor
      * (gates the I_bat closed-loop) and log_task. expt_label points into

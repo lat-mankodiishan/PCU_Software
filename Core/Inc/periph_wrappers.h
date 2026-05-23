@@ -65,4 +65,18 @@ void esc_hw_init   (esc_channel_t ch, uint16_t idle_us);
 /* Write a new pulse width to the channel. Caller owns clamping. */
 void esc_hw_set_us (esc_channel_t ch, uint16_t pulse_us);
 
+/* ---- ECU UART (USART2 — Loweheiser ECU, MegaSquirt/TunerStudio) ----
+ * Blocking TX/RX with caller-supplied timeout (ms). USART2 hardware init
+ * (PA2/PA3, 115200 8N1) is done by CubeMX in MX_USART2_UART_Init at boot.
+ * No init function here — these wrappers assume the peripheral is up. */
+typedef enum {
+    ECU_UART_OK        = 0,
+    ECU_UART_TIMEOUT   = 1,
+    ECU_UART_HAL_ERROR = 2,
+} ecu_uart_status_t;
+
+ecu_uart_status_t ecu_uart_hw_send(const uint8_t *buf, uint16_t len, uint32_t timeout_ms);
+ecu_uart_status_t ecu_uart_hw_recv(uint8_t *buf, uint16_t len, uint32_t timeout_ms);
+void              ecu_uart_hw_flush_rx(void);
+
 #endif /* PERIPH_WRAPPERS_H */

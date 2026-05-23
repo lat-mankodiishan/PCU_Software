@@ -42,11 +42,6 @@ void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  /* Retuned for Hobbywing 200A ESC on TIM1_CH3 (PA10):
-   *   TIM1 clock = 40 MHz (APB2 × 2)
-   *   Prescaler 39  →  1 µs/tick
-   *   Period 19999 →  20 ms period  →  50 Hz frame rate
-   * Pulse width range is 1000–2000 µs (idle..full) written directly to CCR. */
   htim1.Init.Prescaler = 39;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 19999;

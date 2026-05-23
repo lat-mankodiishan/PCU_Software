@@ -170,6 +170,17 @@ standard names. */
 
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
+
+/* Run-time stats: feed the scheduler a 1-tick-per-CPU-cycle counter via DWT.
+ * vTaskGetRunTimeStats / uxTaskGetSystemState then give per-task CPU usage.
+ * Implementation in rtos_stats.c. 32-bit counter at 40 MHz → wraps ~107 s;
+ * we sample every 5 s so window deltas never overflow. */
+extern void     rtos_stats_init_counter(void);
+extern uint32_t rtos_stats_counter(void);
+#define configGENERATE_RUN_TIME_STATS                  1
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()       rtos_stats_init_counter()
+#define portGET_RUN_TIME_COUNTER_VALUE()               rtos_stats_counter()
+
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

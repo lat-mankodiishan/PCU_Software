@@ -1,0 +1,167 @@
+Name,Kind,Type,Byte Offset,Bits,Units,Factor,Adder,Description
+seconds,scalar,U16,0,,s,1.000,0.0,ECU uptime since power-on
+pulseWidth1,scalar,U16,2,,ms,0.000666,0.0,Injector 1 pulse width (also expressible as 0.666 us/LSB raw)
+pulseWidth2,scalar,U16,4,,ms,0.000666,0.0,Injector 2 pulse width
+rpm,scalar,U16,6,,RPM,1.000,0.0,Engine RPM
+advance,scalar,S16,8,,deg,0.100,0.0,Effective ignition timing advance
+squirt,scalar,U08,10,,bitfield,1.000,0.0,Injection event status bitfield (see firing1..inj2 below)
+firing1,bits,U08,10,[0:0],bool,,,Injector 1 currently squirting
+firing2,bits,U08,10,[1:1],bool,,,Injector 2 currently squirting
+sched1,bits,U08,10,[2:2],bool,,,Injector 1 scheduled this event
+inj1,bits,U08,10,[3:3],bool,,,Injector 1 squirting this event (composite)
+sched2,bits,U08,10,[4:4],bool,,,Injector 2 scheduled this event
+inj2,bits,U08,10,[5:5],bool,,,Injector 2 squirting this event
+engine,scalar,U08,11,,bitfield,1.000,0.0,Engine operating-state bitfield (see ready..mapaccden below)
+ready,bits,U08,11,[0:0],bool,,,Engine initialised and ready to run
+crank,bits,U08,11,[1:1],bool,,,Engine in cranking mode
+startw,bits,U08,11,[2:2],bool,,,Startup-warmup enrichment active
+warmup,bits,U08,11,[3:3],bool,,,Warmup phase active
+tpsaccaen,bits,U08,11,[4:4],bool,,,TPS-based acceleration enrichment active
+tpsaccden,bits,U08,11,[5:5],bool,,,TPS-based decel fuel-cut active
+mapaccaen,bits,U08,11,[6:6],bool,,,MAP-based acceleration enrichment active
+mapaccden,bits,U08,11,[7:7],bool,,,MAP-based decel fuel-cut active
+afrtgt1,scalar,U08,12,,AFR,0.1,0.0,Target air/fuel ratio bank 1
+afrtgt2,scalar,U08,13,,AFR,0.1,0.0,Target air/fuel ratio bank 2
+wbo2_en1,scalar,U08,14,,bool,1.000,0.0,Wideband O2 bank 1 measurement valid flag
+wbo2_en2,scalar,U08,15,,bool,1.000,0.0,Wideband O2 bank 2 measurement valid flag
+barometer,scalar,S16,16,,kPa,0.100,0.0,Atmospheric pressure (corrects for altitude)
+map,scalar,S16,18,,kPa,0.100,0.0,Manifold absolute pressure (engine load proxy)
+mat,scalar,S16,20,degC or degF,0.05555 / 0.100,-320 / 0,Manifold (intake) air temp. CELSIUS firmware: factor 0.05555 adder -320; Fahrenheit firmware: factor 0.100 adder 0
+coolant,scalar,S16,22,degC or degF,0.05555 / 0.100,-320 / 0,Coolant / cylinder-head temperature (CHT). Same scaling caveat as mat
+tps,scalar,S16,24,%,0.100,0.0,Throttle position (calibrated from tpsADC)
+batteryVoltage,scalar,S16,26,V,0.100,0.0,ECU supply voltage (12 V system)
+afr1,scalar,S16,28,AFR,0.100,0.0,Measured air/fuel ratio bank 1
+afr2,scalar,S16,30,AFR,0.100,0.0,Measured air/fuel ratio bank 2
+knock,scalar,U16,32,%,0.100,0.0,Knock sensor signal level
+egoCorrection1,scalar,S16,34,%,0.1000,0.0,Closed-loop EGO fuel correction bank 1
+egoCorrection2,scalar,S16,36,%,0.1000,0.0,Closed-loop EGO fuel correction bank 2
+airCorrection,scalar,S16,38,%,0.100,0.0,Air density correction
+warmupEnrich,scalar,S16,40,%,1.000,0.0,Warmup enrichment percent
+accelEnrich,scalar,S16,42,ms,0.100,0.0,Acceleration enrichment additional PW
+tpsfuelcut,scalar,S16,44,%,1.000,0.0,Deceleration fuel cut percent
+baroCorrection,scalar,S16,46,%,0.100,0.0,Barometric pressure correction
+gammaEnrich,scalar,S16,48,%,1.000,0.0,Combined fuel-enrichment factor (sum of corrections)
+veCurr1,scalar,S16,50,%,0.1000,0.0,Current volumetric efficiency bank 1
+veCurr2,scalar,S16,52,%,0.1000,0.0,Current volumetric efficiency bank 2
+iacstep,scalar,S16,54,steps,1.000,0.0,Idle Air Control stepper-motor position
+idleDC,scalar,S16,54,%,0.392,0.0,Idle PWM duty (same offset as iacstep aliased)
+coldAdvDeg,scalar,S16,56,deg,0.100,0.0,Cold-engine ignition advance
+TPSdot,scalar,S16,58,%/s,0.100,0.0,Throttle position rate of change
+MAPdot,scalar,S16,60,kPa/s,1.000,0.0,Manifold pressure rate of change
+dwell,scalar,U16,62,ms,0.0666,0.0,Ignition coil dwell time
+mafload,scalar,S16,64,kPa,0.100,0.0,Mass-airflow-derived engine load
+fuelload,scalar,S16,66,depends on algorithm,0.100,0.0,Effective load used in fuel-table lookup (units depend on `algorithm` config: kPa / %baro / %TPS / MAFload / ITB)
+fuelCorrection,scalar,S16,68,%,1.000,0.0,Fuel correction percent (e.g. flex-fuel/alcohol)
+portStatus,scalar,U08,70,,bitfield,1.000,0.0,Spare GPIO port status bitfield (see port0..port6)
+port0,bits,U08,70,[0:0],bool,,,Spare port 0 state
+port1,bits,U08,70,[1:1],bool,,,Spare port 1 state
+port2,bits,U08,70,[2:2],bool,,,Spare port 2 state
+port3,bits,U08,70,[3:3],bool,,,Spare port 3 state
+port4,bits,U08,70,[4:4],bool,,,Spare port 4 state
+port5,bits,U08,70,[5:5],bool,,,Spare port 5 state
+port6,bits,U08,70,[6:6],bool,,,Spare port 6 state
+knockRetard,scalar,U08,71,deg,0.1,0.0,Knock-driven ignition retard
+EAEFuelCorr1,scalar,U16,72,%,1.0,0.0,Enhanced AE fuel correction bank 1
+egoV,scalar,S16,74,V,0.01,0.0,EGO sensor raw voltage bank 1
+egoV2,scalar,S16,76,V,0.01,0.0,EGO sensor raw voltage bank 2
+status1,scalar,U08,78,,bitfield,1.0,0.0,General status flags 1
+status2,scalar,U08,79,,bitfield,1.0,0.0,General status flags 2
+status3,scalar,U08,80,,bitfield,1.0,0.0,General status flags 3
+status4,scalar,U08,81,,bitfield,1.0,0.0,General status flags 4
+looptime,scalar,U16,82,us,0.6667,0.0,Main control-loop iteration time (ECU health indicator)
+status5,scalar,U16,84,,bitfield,1,0,General status flags 5
+tpsADC,scalar,U16,86,ADC,1,0,Raw throttle-position ADC counts (pre-calibration)
+fuelload2,scalar,S16,88,depends on algorithm2,0.100,0.0,Secondary fuel-table load (when dual-table fuel enabled)
+ignload,scalar,S16,90,depends on IgnAlgorithm,0.100,0.0,Ignition-table load lookup variable
+ignload2,scalar,S16,92,depends on IgnAlgorithm2,0.100,0.0,Secondary ignition-table load
+synccnt,scalar,U08,94,count,1,0,Trigger-sync error count since boot
+timing_err,scalar,S08,95,%,0.1,0,Timing-prediction error percentage
+deltaT,scalar,S32,96,us,1.000,0.0,Normalized time between trigger pulses (EDIS only)
+wallfuel1,scalar,U32,100,us,1.000,0.0,Wall-wetting fuel accumulator bank 1
+gpioadc0,scalar,U16,104,ADC,1.000,0.0,Generic-IO ADC input 0 (raw counts)
+gpioadc1,scalar,U16,106,ADC,1.000,0.0,Generic-IO ADC input 1
+gpioadc2,scalar,U16,108,ADC,1.000,0.0,Generic-IO ADC input 2
+gpioadc3,scalar,U16,110,ADC,1.000,0.0,Generic-IO ADC input 3
+gpioadc4,scalar,U16,112,ADC,1.000,0.0,Generic-IO ADC input 4
+gpioadc5,scalar,U16,114,ADC,1.000,0.0,Generic-IO ADC input 5
+gpioadc6,scalar,U16,116,ADC,1.000,0.0,Generic-IO ADC input 6
+gpioadc7,scalar,U16,118,ADC,1.000,0.0,Generic-IO ADC input 7
+gpiopwmin0,scalar,U16,120,raw,1.000,0.0,Generic-IO PWM input 0 (frequency or duty counts)
+gpiopwmin1,scalar,U16,122,raw,1.000,0.0,Generic-IO PWM input 1
+gpiopwmin2,scalar,U16,124,raw,1.000,0.0,Generic-IO PWM input 2
+gpiopwmin3,scalar,U16,126,raw,1.000,0.0,Generic-IO PWM input 3
+adc6,scalar,U16,128,ADC,1,0.0,Extra ADC input 6 — wired for EGT probe 1. EGT in degC = adc6 * 1.222 (1250 degC K-type) or adc6 * 0.956 (1000 degC K-type)
+adc7,scalar,U16,130,ADC,1,0.0,Extra ADC input 7 — wired for EGT probe 2. Same conversion as adc6
+wallfuel2,scalar,U32,132,us,1.000,0.0,Wall-wetting fuel accumulator bank 2
+EAEFuelCorr2,scalar,U16,136,%,1.0,0.0,Enhanced AE fuel correction bank 2
+boostduty,scalar,U08,138,%,1.0,0.0,Boost-control solenoid duty cycle
+syncreason,scalar,U08,139,code,1.0,0.0,Code identifying the reason for the last loss of sync
+user0,scalar,U16,140,raw,1.0,0.0,User-defined channel (firmware-specific)
+inj_adv1,scalar,S16,142,deg,0.100,0.0,Injection-event timing bank 1
+inj_adv2,scalar,S16,144,deg,0.100,0.0,Injection-event timing bank 2
+pulseWidth3,scalar,U16,146,ms,0.000666,0.0,Injector 3 pulse width
+pulseWidth4,scalar,U16,148,ms,0.000666,0.0,Injector 4 pulse width
+vetrim1curr,scalar,S16,150,%,0.00976562500,10240.0,VE closed-loop trim bank 1 (raw -10240..+10240 -> -100..+100 %)
+vetrim2curr,scalar,S16,152,%,0.00976562500,10240.0,VE closed-loop trim bank 2
+vetrim3curr,scalar,S16,154,%,0.00976562500,10240.0,VE closed-loop trim bank 3
+vetrim4curr,scalar,S16,156,%,0.00976562500,10240.0,VE closed-loop trim bank 4
+maf,scalar,U16,158,g/sec,0.010 * (maf_range+1),0.0,Mass airflow rate (if MAF sensor wired). Factor depends on maf_range config: 650/1300/1950/2600 g/s ranges
+eaeload1,scalar,S16,160,depends on eaeload,0.1,0.0,EAE (enhanced AE) load axis
+afrload1,scalar,S16,162,depends on afrload,0.1,0.0,AFR-target-table load axis
+RPMdot,scalar,S16,164,rpm/sec,10,0.0,Rate of change of engine speed
+gpioport0,scalar,U08,166,bitfield,1.000,0.0,Generic-IO digital port 0 state
+gpioport1,scalar,U08,167,bitfield,1.000,0.0,Generic-IO digital port 1 state
+gpioport2,scalar,U08,168,bitfield,1.000,0.0,Generic-IO digital port 2 state
+cl_idle_targ_rpm,scalar,S16,170,rpm,1,0,Closed-loop idle controller target RPM
+maf_volts,scalar,U16,172,V,0.001,0.0,Raw MAF sensor voltage
+airtemp,scalar,S16,174,degC or degF,0.05555 / 0.100,-320 / 0,Independent air-temperature sensor (separate from mat). CELSIUS firmware vs Fahrenheit firmware scaling
+dwell_trl,scalar,U16,176,ms,0.0666,0.0,Trailing-coil dwell (wasted-spark / dual coil setups)
+fuel_pct,scalar,U16,178,%,0.1000,0.0,Flex-fuel ethanol percent reading
+boost_targ,scalar,S16,180,kPa,0.1,0,Boost-control target pressure
+ext_advance,scalar,S16,182,deg,0.100,0.0,External advance input (e.g. from auxiliary controller)
+base_advance,scalar,S16,184,deg,0.100,0.0,Base ignition advance from the spark table lookup
+idle_cor_advance,scalar,S16,186,deg,0.100,0.0,Idle-correction advance offset
+mat_retard,scalar,S16,188,deg,0.100,0.0,MAT-based ignition retard
+flex_advance,scalar,S16,190,deg,0.100,0.0,Flex-fuel advance offset
+adv1,scalar,S16,192,deg,0.100,0.0,Additional advance contributor 1
+adv2,scalar,S16,194,deg,0.100,0.0,Additional advance contributor 2
+adv3,scalar,S16,196,deg,0.100,0.0,Additional advance contributor 3
+revlim_retard,scalar,S16,198,deg,0.100,0.0,Rev-limiter ignition retard
+nitrous_retard,scalar,S16,200,deg,0.100,0.0,Nitrous-system ignition retard
+deadtime1,scalar,U16,202,ms,0.001,0.0,Injector deadtime (electrical opening lag)
+n2o_addfuel,scalar,U16,204,ms,0.000666,0.0,Nitrous-system additional fuel PW
+portbde,scalar,U08,206,bitfield,1.0,0.0,Port B/D/E pin states (firmware-specific)
+portam,scalar,U08,207,bitfield,1.0,0.0,Port A/M pin states
+portt,scalar,U08,208,bitfield,1.0,0.0,Port T pin states
+can_error_cnt,scalar,U08,209,count,1,0,CAN error counter
+can_error,scalar,U16,210,bitfield,1,0,CAN error flags
+secl,computed,,,,s,,,seconds modulo 256 (legacy runtime display)
+pulseWidth,computed,,,,s,,,alias for pulseWidth1
+throttle,computed,,,,%,,,alias for tps
+lambda1,computed,,,,Lambda,,,afr1 / 14.7 (stoich lambda equivalent)
+lambda2,computed,,,,Lambda,,,afr2 / 14.7
+egoCorrection,computed,,,,%,,,Mean of egoCorrection1 and egoCorrection2
+veCurr,computed,,,,%,,,alias for veCurr1
+cycleTime1,computed,,,,ms,,,Time for one full injection cycle bank 1 (60000 / rpm * (2 - twoStroke))
+cycleTime2,computed,,,,ms,,,Time for one full injection cycle bank 2
+nSquirts1,computed,,,,count,,,Injection events per cycle bank 1 (nCylinders / divider)
+nSquirts2,computed,,,,count,,,Injection events per cycle bank 2
+dutyCycle1,computed,,,,%,,,Injector 1 duty cycle (100 * nSquirts1 / altDiv1 * pulseWidth1 / cycleTime1)
+dutyCycle2,computed,,,,%,,,Injector 2 duty cycle
+boostbar,computed,,,,bar,,,(map - barometer) / 100
+boostpsig,computed,,,,psi,,,(map - barometer) * 0.1450
+vacuum,computed,,,,inHg,,,(barometer - map) * 0.2953007
+boostvac,computed,,,,psi or inHg,,,vacuum if below atmospheric else boostpsig
+egoVoltage,computed,,,,V/Lambda/AFR,,,egoV / lambda1 / afr1 depending on firmware build (NARROW_BAND_EGO / LAMBDA / default)
+egt6temp,computed,,,,degC or degF,,,EGT probe 1: adc6 * 1.222 (1250C K-type) or adc6 * 0.956 (1000C K-type) or Fahrenheit equivalent
+egt7temp,computed,,,,degC or degF,,,EGT probe 2: same conversion as egt6temp
+calcflow,computed,,,,(synthetic),,,Synthetic mass airflow = fuelload * rpm * veCurr1 / 100
+maxFuel,computed,,,,L/h,,,Max possible fuel flow at 100% duty = (staged_pri_size/1000) * nCylinders * 60
+fuelFlow,computed,,,,L/h,,,Actual fuel flow estimate (computed from PW * RPM * cylinders * injector flow rate)
+accDecEnrich,computed,,,,%,,,Combined accel/decel enrichment percent
+accDecEnrichPcnt,computed,,,,%,,,Variant accel/decel percent
+accEnrichPcnt,computed,,,,%,,,Acceleration enrichment percent only
+accEnrichMS,computed,,,,ms,,,Acceleration enrichment in ms (alias for accelEnrich)
+decEnrichPcnt,computed,,,,%,,,Deceleration enrichment percent only
+decEnrichMS,computed,,,,ms,,,Deceleration enrichment in ms
+rpm100,computed,,,,RPMx100,,,rpm / 100 (for compact gauges)

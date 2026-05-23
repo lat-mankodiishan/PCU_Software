@@ -2,8 +2,12 @@
 #include "can.h"
 #include "iwdg.h"
 #include "tim.h"
+#include "usart.h"
 #include "stm32f4xx_hal.h"
 #include "main.h"
+#include "cmsis_os2.h"
+#include "FreeRTOS.h"
+#include "semphr.h"
 
 static CAN_HandleTypeDef *handle_of(can_bus_t bus) {
     switch (bus) {
@@ -147,4 +151,94 @@ void esc_hw_init(esc_channel_t ch, uint16_t idle_us) {
 
 void esc_hw_set_us(esc_channel_t ch, uint16_t pulse_us) {
     __HAL_TIM_SET_COMPARE(&htim1, esc_hal_channel(ch), pulse_us);
+}
+
+/* ---- ECU UART (USART2) ---------------------------------------------- */
+
+static ecu_uart_status_t map_hal(HAL_StatusTypeDef st) {
+    switch (st) {
+    case HAL_OK:      return ECU_UART_OK;
+    case HAL_TIMEOUT: return ECU_UART_TIMEOUT;
+    default:          return ECU_UART_HAL_ERROR;
+    }
+}
+
+ecu_uart_status_t ecu_uart_hw_send(const uint8_t *buf, uint16_t len, uint32_t timeout_ms) {
+    return map_hal(HAL_UART_Transmit(&huart2, (uint8_t *)buf, len, timeout_ms));
+}
+
+/* DMA-based ECU receive ------------------------------------------------
+ * HAL polling Receive can't keep up at 115200 inside FreeRTOS — SysTick
+ * and other IRQs preempt for >87 µs between bytes, latching ORE and
+ * killing the receive. DMA hardware fills the buffer at line rate with
+ * zero CPU involvement, then fires the RxCplt callback we override below
+ * to release a binary semaphore that the task is waiting on.
+ *
+ * Lifecycle per poll: acquire sem at timeout=0 to drain any late
+ * "callback fired after we already timed out" event from the prior cycle,
+ * start DMA, block on the sem with the caller's timeout, on timeout call
+ * HAL_UART_AbortReceive to clean up the half-finished DMA. */
+
+static StaticSemaphore_t s_ecu_rx_sem_cb;
+static osSemaphoreId_t   s_ecu_rx_sem = NULL;
+
+/* Diagnostic: latest UART error code seen by the HAL error callback.
+ * Watch in Live Watch — non-zero indicates a problem on the link. */
+volatile uint32_t g_ecu_uart_last_error = 0;
+
+static void ecu_uart_ensure_sem(void) {
+    if (s_ecu_rx_sem == NULL) {
+        static const osSemaphoreAttr_t attr = {
+            .name    = "ecu_rx",
+            .cb_mem  = &s_ecu_rx_sem_cb,
+            .cb_size = sizeof(s_ecu_rx_sem_cb),
+        };
+        s_ecu_rx_sem = osSemaphoreNew(1, 0, &attr);   /* binary, starts taken */
+    }
+}
+
+ecu_uart_status_t ecu_uart_hw_recv(uint8_t *buf, uint16_t len, uint32_t timeout_ms) {
+    ecu_uart_ensure_sem();
+
+    /* Drain any leftover release from a late callback after a prior timeout. */
+    (void)osSemaphoreAcquire(s_ecu_rx_sem, 0);
+
+    HAL_StatusTypeDef st = HAL_UART_Receive_DMA(&huart2, buf, len);
+    if (st != HAL_OK) {
+        return (st == HAL_BUSY) ? ECU_UART_TIMEOUT : ECU_UART_HAL_ERROR;
+    }
+
+    if (osSemaphoreAcquire(s_ecu_rx_sem, timeout_ms) == osOK) {
+        return ECU_UART_OK;
+    }
+
+    /* Sem wait timed out — DMA may still be in flight. Abort cleanly. */
+    HAL_UART_AbortReceive(&huart2);
+    return ECU_UART_TIMEOUT;
+}
+
+/* HAL weak override — fires from the DMA1_Stream5 ISR when the requested
+ * byte count has landed in the buffer. Releases the receive semaphore so
+ * the waiting task can return ECU_UART_OK. */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART2 && s_ecu_rx_sem != NULL) {
+        (void)osSemaphoreRelease(s_ecu_rx_sem);
+    }
+}
+
+/* HAL weak override — captures UART error events for diagnostics. ORE
+ * shouldn't happen on DMA RX, but FE/NE on a noisy link still might. */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART2) {
+        g_ecu_uart_last_error = huart->ErrorCode;
+    }
+}
+
+void ecu_uart_hw_flush_rx(void) {
+    /* Clear overrun/framing/noise flags and drain any byte sitting in DR.
+     * Mirrors pyserial's reset_input_buffer() before each 'A' request. */
+    __HAL_UART_CLEAR_OREFLAG(&huart2);
+    while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+        (void)huart2.Instance->DR;
+    }
 }
