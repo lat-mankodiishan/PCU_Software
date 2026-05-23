@@ -1,15 +1,4 @@
-/*
- * bms_task.c — placeholder.
- *
- * Subscribes match-all on the battery-side CAN bus, drains RX into a TODO
- * parser stub, and runs a stale-detection check. When the BMS protocol is
- * known: narrow the can_mgr_subscribe filter to the BMS message IDs and
- * fill in parse_bms_frame() to populate g_pt.bms_*.
- *
- * Architecture target: BMS lives on Bus 3 (battery path) on the H7. F405
- * has no Bus 3, so for bring-up we listen on CAN_BUS_ENGINE — adjust when
- * the H7 board is in.
- */
+/* bms_task — placeholder BMS RX, 10 Hz, listens on CAN_BUS_ENGINE for F405. */
 
 #include "bms_task.h"
 #include "can_manager.h"
@@ -46,14 +35,7 @@ static osMessageQueueId_t s_rx_q;
 
 static void bms_task(void *arg);
 
-/* TODO: fill in once the BMS CAN protocol is known.
- *  - decode the frame
- *  - acquire g_pt_mtx
- *  - update g_pt.bms_soc_pct / bms_v_bat_cV / bms_i_bat_cA / bms_max_cell_C
- *  - update g_pt.bms_input_tick = osKernelGetTickCount()
- *  - release mutex
- *  - return true on a successful parse so the caller can clear FAULT_BMS_STALE
- */
+/* TODO: implement once BMS CAN protocol is known. */
 static bool parse_bms_frame(const can_frame_t *f) {
     (void)f;
     return false;
@@ -70,9 +52,7 @@ void bms_task_start(void) {
     s_rx_q = osMessageQueueNew(BMS_RX_QUEUE_DEPTH,
                                sizeof(can_frame_t), &qattr);
 
-    /* TODO: narrow this filter to the BMS message IDs once protocol is known.
-     * Today: match-all extended frames so any traffic shows up while bringing
-     * up the bus. Consumes one HW filter bank. */
+    /* TODO: narrow filter to BMS IDs; match-all for bring-up. */
     can_mgr_subscribe(BMS_BUS, 0u, 0u, true, s_rx_q);
 
     static const osThreadAttr_t tattr = {
@@ -91,9 +71,6 @@ static void bms_task(void *arg) {
     uint32_t next = osKernelGetTickCount();
 
     for (;;) {
-        /* Drain RX. parse_bms_frame is a stub today — returns false → no
-         * tick update → no fault clear. Once the parser is real, successful
-         * decodes update g_pt and clear FAULT_BMS_STALE. */
         can_frame_t f;
         while (osMessageQueueGet(s_rx_q, &f, NULL, 0) == osOK) {
             if (parse_bms_frame(&f)) {
@@ -101,8 +78,7 @@ static void bms_task(void *arg) {
             }
         }
 
-        /* Stale detection — arms itself on first successful parse. Until
-         * then bms_input_tick == 0 and we don't raise the fault. */
+        /* Stale detection arms on first parse (bms_input_tick == 0 until). */
         osMutexAcquire(g_pt_mtx, osWaitForever);
         uint32_t last = g_pt.bms_input_tick;
         osMutexRelease(g_pt_mtx);

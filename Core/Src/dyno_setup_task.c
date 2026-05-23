@@ -1,25 +1,4 @@
-/*
- * dyno_setup_task.c — SSD-250A current sensor subscriber for dyno bench tests.
- *
- * Connects to ID 5FX-3 SSD-250A on CAN1 (CAN_BUS_DRONECAN). The SSD broadcasts
- * native CAN 2.0B standard frames at IDs 0x5F1..0x5F7 — we subscribe via the
- * can_manager and drain the queue at 50 Hz, mirroring ecu_task's structure.
- *
- * Frame layout (from inverterCANComm/ssd_250A_C.c, taken as-is):
- *
- *   0x5F1 current   — int32 mA           LE,  DLC = 4
- *   0x5F3 vbus      — int32 mV           LE,  DLC = 4
- *   0x5F5 power     — uint32 dW (0.1 W)  LE,  DLC = 4
- *   0x5F6 energy    — uint64 Wh          LE,  DLC = 8
- *   0x5F2/4/7       — temperature/coulomb/errors (unused here, dropped)
- *
- * Bus bitrate: SSD-250A must be set to match CAN1 (500 kbps per
- * periph_wrappers.h comment) — use the SSD-side ssd_set_baudrate cmd
- * during commissioning.
- *
- * No mutex on the read side — log_task already takes g_pt_mtx around its
- * snapshot. We take the same mutex for our writes.
- */
+/* dyno_setup_task — SSD-250A current sensor RX on CAN1, 50 Hz drain. */
 
 #include "dyno_setup_task.h"
 #include "can_manager.h"
@@ -35,9 +14,7 @@
 #define DYNO_DRAIN_PERIOD_MS    20      /* 50 Hz drain */
 #define DYNO_RX_QUEUE_DEPTH     16
 
-/* SSD-250A sensor #3 (5FX-3) — source/reference current. IDs 0x5F1..0x5F7.
- * SSD-250A sensor #2 (4FX-2) — load/feedback current.    IDs 0x4F1..0x4F7.
- * Two HW filter banks, one per sensor block. */
+/* 5FX-3 = source, 4FX-2 = load; one HW filter bank per sensor block. */
 #define DYNO_FILTER_5FX_ID     0x5F0u
 #define DYNO_FILTER_5FX_MASK   0x7F8u
 #define DYNO_FILTER_4FX_ID     0x4F0u
@@ -53,21 +30,18 @@
 #define SSD2_POWER             0x4F5u
 #define SSD2_ENERGY            0x4F6u
 
-/* SSD command channel — used to enable broadcast bits + set rate at boot. */
 #define SSD_CAN_ID_SET_COMMAND      0x3FAu
 #define SSD_CMD_SET_MODE            0x12u
 #define SSD_CMD_SET_READING_DELAY   0x16u
 
-/* SSD SetMode config_value bit positions (see SetMode_config_t in ssd_250A_C.h). */
+/* SetMode_config_t bits (ssd_250A_C.h). */
 #define SSD_MODE_AUTO_SEND     (1u <<  8)
 #define SSD_MODE_SEND_CURRENT  (1u <<  9)
 #define SSD_MODE_SEND_VBUS     (1u << 11)
 #define SSD_MODE_SEND_POWER    (1u << 13)
 #define SSD_MODE_SEND_ENERGY   (1u << 14)
 
-/* Reading delay in ms between successive auto-send sweeps.
- * 100 ms ⇒ ~10 Hz per quantity (current, vbus, power, energy each
- * broadcast once per sweep). */
+/* ms between auto-send sweeps; 100 ms => ~10 Hz per quantity. */
 #define SSD_READING_DELAY_MS   100u
 
 #define DYNO_BUS               CAN_BUS_DRONECAN
@@ -81,7 +55,7 @@ static osMessageQueueId_t s_rx_q;
 
 static void dyno_task(void *arg);
 
-/* Debug counters — read via Live Expressions or STM32_Programmer_CLI -r32 */
+/* Debug counters. */
 volatile uint32_t g_dyno_setmode_attempts = 0;
 volatile uint32_t g_dyno_setmode_ok       = 0;
 volatile uint32_t g_dyno_rx_frames        = 0;
@@ -90,8 +64,7 @@ volatile uint32_t g_dyno_rx_vbus          = 0;
 volatile uint32_t g_dyno_rx_power         = 0;
 volatile uint32_t g_dyno_rx_energy        = 0;
 
-/* Lifted verbatim from ssd_250A_C.c parsers — little-endian byte assembly,
- * variable-length to match the original. */
+/* LE byte assembly, variable-length (from ssd_250A_C.c). */
 static uint64_t le_u64(const uint8_t *data, uint8_t length) {
     uint64_t v = 0;
     for (uint8_t i = 0; i < length && i < 8; i++) {
@@ -100,9 +73,7 @@ static uint64_t le_u64(const uint8_t *data, uint8_t length) {
     return v;
 }
 
-/* Volatile mode change — does not call save_setting, so the SSD reverts on
- * its own power cycle. Re-issued on every PCU boot. Byte order matches
- * ssd_setmode() in the inverter project: [cmd, hi, lo]. */
+/* Volatile mode set; re-issued each PCU boot. Byte order [cmd, hi, lo]. */
 static void dyno_send_setmode(uint16_t cfg) {
     can_frame_t f = { 0 };
     f.id  = SSD_CAN_ID_SET_COMMAND;
@@ -114,8 +85,7 @@ static void dyno_send_setmode(uint16_t cfg) {
     if (can_mgr_send(DYNO_BUS, &f, 100)) g_dyno_setmode_ok++;
 }
 
-/* Set the SSD's per-quantity broadcast period (ms). Same byte layout as
- * ssd_set_reading_delay() in the inverter project. */
+/* Set per-quantity broadcast period (ms). */
 static void dyno_send_reading_delay(uint16_t ms) {
     can_frame_t f = { 0 };
     f.id  = SSD_CAN_ID_SET_COMMAND;
@@ -134,7 +104,7 @@ static void dyno_parse_frame(const can_frame_t *f) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
     bool is_load = false;
     switch (f->id) {
-    /* --- Source sensor (5FX-3) --- */
+    /* ---- Source (5FX-3) ---- */
     case SSD3_CURRENT:
         g_pt.dyno_current_mA = (int32_t)le_u64(f->data, f->dlc);
         g_dyno_rx_current++;
@@ -151,7 +121,7 @@ static void dyno_parse_frame(const can_frame_t *f) {
         g_pt.dyno_energy_Wh = le_u64(f->data, f->dlc);
         g_dyno_rx_energy++;
         break;
-    /* --- Load sensor (4FX-2) --- */
+    /* ---- Load (4FX-2) ---- */
     case SSD2_CURRENT:
         g_pt.dyno_load_current_mA = (int32_t)le_u64(f->data, f->dlc);
         is_load = true;
@@ -170,7 +140,7 @@ static void dyno_parse_frame(const can_frame_t *f) {
         break;
     default:
         osMutexRelease(g_pt_mtx);
-        return;       /* don't bump tick on unrecognised IDs */
+        return;
     }
     if (is_load) g_pt.dyno_load_input_tick = osKernelGetTickCount();
     else         g_pt.dyno_input_tick      = osKernelGetTickCount();
@@ -188,7 +158,6 @@ void dyno_setup_task_start(void) {
     s_rx_q = osMessageQueueNew(DYNO_RX_QUEUE_DEPTH,
                                sizeof(can_frame_t), &qattr);
 
-    /* Two filter banks: 5FX-3 (0x5F0..7) + 4FX-2 (0x4F0..7), same RX queue. */
     can_mgr_subscribe(DYNO_BUS, DYNO_FILTER_5FX_ID, DYNO_FILTER_5FX_MASK, false, s_rx_q);
     can_mgr_subscribe(DYNO_BUS, DYNO_FILTER_4FX_ID, DYNO_FILTER_4FX_MASK, false, s_rx_q);
 
@@ -206,7 +175,7 @@ void dyno_setup_task_start(void) {
 static void dyno_task(void *arg) {
     (void)arg;
 
-    /* Startup grace so can_manager + CAN1 HW are fully up before TX. */
+    /* Startup grace for can_manager + CAN1 HW. */
     osDelay(500);
 
     const uint16_t cfg = SSD_MODE_AUTO_SEND
@@ -215,17 +184,14 @@ static void dyno_task(void *arg) {
                        | SSD_MODE_SEND_POWER
                        | SSD_MODE_SEND_ENERGY;
 
-    /* Re-issue SetMode every 2 s. Volatile (no save_setting) — the SSD's
-     * persistent config isn't disturbed; this re-applies after each PCU
-     * reboot until the SSD itself power-cycles. Re-tx survives a single
-     * bus arbitration loss. */
+    /* Re-issue SetMode every 2 s; volatile, survives arbitration loss. */
     uint32_t setmode_next = osKernelGetTickCount();
     uint32_t next         = osKernelGetTickCount();
 
     for (;;) {
         if ((int32_t)(osKernelGetTickCount() - setmode_next) >= 0) {
             dyno_send_setmode(cfg);
-            osDelay(20);                            /* let mode settle on SSD */
+            osDelay(20);
             dyno_send_reading_delay(SSD_READING_DELAY_MS);
             setmode_next += 2000;
         }

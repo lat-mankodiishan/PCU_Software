@@ -1,5 +1,5 @@
 #include "control_law.h"
-#include "powertrain_state.h"   /* I_RECT_MAX_CA */
+#include "powertrain_state.h"
 #include <stdint.h>
 
 void control_law_init(ctl_state_t *st) {
@@ -27,7 +27,7 @@ static inline int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi) {
 int16_t control_law_step(ctl_state_t *st,
                          const ctl_inputs_t *in,
                          const ctl_params_t *p) {
-    /* --- EMA filter on throttle (Q15) --- */
+    /* ---- EMA filter on throttle (Q15) ---- */
     int32_t err_pct = (int32_t)in->throttle_dem_pct - (int32_t)st->throttle_filt_pct;
     int32_t adj     = (err_pct * (int32_t)p->throttle_alpha_q15) >> 15;
     int32_t filt    = clamp_i32((int32_t)st->throttle_filt_pct + adj, 0, 10000);
@@ -39,14 +39,12 @@ int16_t control_law_step(ctl_state_t *st,
     case VESC_MODE_TAKEOFF:
     case VESC_MODE_CLIMB:
     case VESC_MODE_LAND:
-        /* Battery is the swing source; rectifier pinned at peak. */
+        /* Battery is swing source; rectifier pinned at peak. */
         out_cA = p->I_rect_peak_cA;
         break;
 
     case VESC_MODE_CRUISE: {
-        /* Detect a real demand shift via the high-passed throttle: small
-         * transients (within deadband) ride on battery, larger persistent
-         * shifts cause us to trim setpoint toward demand. */
+        /* HP-filtered throttle: small transients ride on battery. */
         int32_t hp = (int32_t)in->throttle_dem_pct - (int32_t)st->throttle_filt_pct;
         int32_t hp_abs = hp < 0 ? -hp : hp;
 
@@ -66,7 +64,7 @@ int16_t control_law_step(ctl_state_t *st,
             }
             out_cA = cur;
         } else {
-            out_cA = st->I_rect_cmd_cA;     /* hold inside deadband */
+            out_cA = st->I_rect_cmd_cA; /* hold inside deadband */
         }
         break;
     }
@@ -86,11 +84,7 @@ int16_t control_law_step(ctl_state_t *st,
 int16_t control_law_step_ibat(ctl_state_t *st,
                               int16_t i_bat_cA,
                               const ctl_params_t *p) {
-    /* Sign convention: bms_i_bat_cA is +discharge. When the battery is
-     * discharging we raise the rectifier command so the rectifier covers
-     * the load; when charging (i_bat<0) we back the command down. The
-     * adjustment direction therefore matches the sign of i_bat directly. */
-
+    /* bms_i_bat_cA: +discharge. Adj sign matches i_bat directly. */
     int32_t i_abs = i_bat_cA < 0 ? -(int32_t)i_bat_cA : (int32_t)i_bat_cA;
     if (i_abs < (int32_t)p->ibat_deadband_cA) {
         return st->I_rect_cmd_cA;

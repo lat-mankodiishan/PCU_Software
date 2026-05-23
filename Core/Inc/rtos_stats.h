@@ -3,16 +3,11 @@
 
 #include <stdint.h>
 
-/* Cortex-M4 DWT cycle-counter shim used as FreeRTOS run-time-stats source.
- * Wired into the scheduler via portCONFIGURE_TIMER_FOR_RUN_TIME_STATS /
- * portGET_RUN_TIME_COUNTER_VALUE in FreeRTOSConfig.h. Safe to call before
- * the scheduler starts. */
+/* DWT CYCCNT shim for FreeRTOS run-time stats. */
 void     rtos_stats_init_counter(void);
 uint32_t rtos_stats_counter(void);
 
-/* Create the periodic stats-dump task (low priority). Prints per-task CPU
- * % and stack high-water-mark via SWO every ~5 s, and mirrors the latest
- * overall CPU load into g_pt.cpu_load_pct / cpu_load_tick. */
+/* Periodic 5 s SWO dump + mirror to g_pt.cpu_load_pct. */
 void rtos_stats_task_start(void);
 
 #endif /* RTOS_STATS_H */

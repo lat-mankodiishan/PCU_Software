@@ -12,7 +12,7 @@ static StaticSemaphore_t s_pt_mtx_cb;
 void pt_init(void) {
     memset(&g_pt, 0, sizeof(g_pt));
     g_pt.mode            = VESC_MODE_IDLE;
-    g_pt.rect_motor_type = VESC_MOTOR_TYPE_FOC;     /* steady-state default */
+    g_pt.rect_motor_type = VESC_MOTOR_TYPE_FOC;
     g_pt.engine_throttle_pulse_us = ENGINE_THROTTLE_PULSE_MIN_US;
 
     static const osMutexAttr_t attr = {
@@ -23,8 +23,7 @@ void pt_init(void) {
     };
     g_pt_mtx = osMutexNew(&attr);
 
-    /* Park the engine throttle ESC at 0 % (1100 µs) before any setter can
-     * fire. Safe-idle on boot — the engine sees the servo at min position. */
+    /* Park engine throttle ESC at min pulse before any setter runs. */
     esc_hw_init(ESC_CH_ENGINE, ENGINE_THROTTLE_PULSE_MIN_US);
 }
 

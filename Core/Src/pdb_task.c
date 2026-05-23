@@ -6,7 +6,7 @@
 #include "task.h"
 
 #define PDB_PERIOD_MS         20      /* 50 Hz */
-#define PDB_SUP_HANG_MS      100      /* declare supervisor hung after 100 ms */
+#define PDB_SUP_HANG_MS      100
 
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[256];     /* 1 KB */
@@ -31,11 +31,9 @@ static void pdb_task(void *arg) {
     uint32_t next               = osKernelGetTickCount();
     uint32_t last_heartbeat     = 0;
     uint32_t last_progress_tick = osKernelGetTickCount();
-    bool     supervisor_alive   = false;     /* don't drive until proven */
+    bool     supervisor_alive   = false;
 
-    /* GPIOs are at their reset state from MX_GPIO_Init (low = open).
-     * PDB does its own precharge. We start writing only once the
-     * supervisor's heartbeat shows progress. */
+    /* GPIO reset state = low = open; write only after supervisor progress. */
 
     for (;;) {
         uint32_t hb;
@@ -57,8 +55,7 @@ static void pdb_task(void *arg) {
             pt_clear_fault(FAULT_SUPERVISOR_HANG);
         } else if (supervisor_alive &&
                    (now - last_progress_tick) > PDB_SUP_HANG_MS) {
-            /* Supervisor stopped incrementing — hold-last-state.
-             * NEVER open contactors here; mid-flight open is a crash. */
+            /* Hold-last-state; never open contactors mid-flight. */
             supervisor_alive = false;
             pt_set_fault(FAULT_SUPERVISOR_HANG);
         }
@@ -66,7 +63,6 @@ static void pdb_task(void *arg) {
         if (supervisor_alive) {
             pdb_hw_write(bat_cmd, rect_cmd);
         }
-        /* else: do nothing — GPIO output level is retained by hardware. */
 
         next += PDB_PERIOD_MS;
         osDelayUntil(next);

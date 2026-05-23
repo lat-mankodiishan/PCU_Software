@@ -1,37 +1,18 @@
-/*
- * rtos_stats.c — FreeRTOS runtime-stats counter source + periodic dump task.
- *
- * The scheduler calls rtos_stats_init_counter() once at start (via
- * portCONFIGURE_TIMER_FOR_RUN_TIME_STATS) and rtos_stats_counter() at every
- * context switch (via portGET_RUN_TIME_COUNTER_VALUE). Each task accumulates
- * cycles spent on-CPU into TCB->ulRunTimeCounter.
- *
- * The dump task wakes every 5 s, snapshots all task counters with
- * uxTaskGetSystemState, diffs against the previous snapshot, and prints
- * a per-task CPU % + stack high-water-mark table over SWO. It also writes
- * the IDLE-derived CPU load into g_pt.cpu_load_pct so other consumers
- * (log_task, Live Watch) can see it without parsing the printf stream.
- *
- * Cost: ~0 in steady state (DWT CYCCNT increments in hardware; the
- * stats task is osPriorityLow so it only runs when nothing else needs the
- * CPU). The 5-second printf is the only meaningful expense and it sits
- * below all real work tasks.
- */
+/* rtos_stats — DWT CYCCNT source + 5 s SWO dump of per-task CPU%/stack HWM. */
 
 #include "rtos_stats.h"
 #include "powertrain_state.h"
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
 #include "task.h"
-#include "stm32f4xx_hal.h"      /* CoreDebug, DWT */
+#include "stm32f4xx_hal.h"
 #include <stdio.h>
 #include <string.h>
 
-/* --- DWT cycle counter -------------------------------------------------- */
+/* ---- DWT cycle counter ---- */
 
 void rtos_stats_init_counter(void) {
-    /* Enable trace + DWT clocking, reset and start CYCCNT. Idempotent.
-     * Required before the scheduler reads it for the first time. */
+    /* Enable TRCENA + CYCCNT; idempotent. */
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CYCCNT       = 0;
     DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
@@ -41,15 +22,14 @@ uint32_t rtos_stats_counter(void) {
     return DWT->CYCCNT;
 }
 
-/* --- Periodic dump task ------------------------------------------------- */
+/* ---- Periodic dump task ---- */
 
 #define STATS_PERIOD_MS    5000u
-#define STATS_MAX_TASKS    16u       /* upper bound; grows with task count */
+#define STATS_MAX_TASKS    16u
 
 static StaticTask_t s_tcb;
-static StackType_t  s_stack[512];    /* 2 KB — printf + 2× status arrays need room */
+static StackType_t  s_stack[512];    /* 2 KB */
 
-/* Two snapshots so we can diff per-task run-time counters across windows. */
 static TaskStatus_t s_status_now [STATS_MAX_TASKS];
 static TaskStatus_t s_status_prev[STATS_MAX_TASKS];
 static UBaseType_t  s_n_prev        = 0;
@@ -64,7 +44,7 @@ void rtos_stats_task_start(void) {
         .cb_size    = sizeof(s_tcb),
         .stack_mem  = s_stack,
         .stack_size = sizeof(s_stack),
-        .priority   = osPriorityLow,         /* prio 2 — below all real work */
+        .priority   = osPriorityLow,         /* prio 2 */
     };
     osThreadNew(stats_task, NULL, &tattr);
 }
@@ -80,8 +60,7 @@ static const TaskStatus_t *find_by_handle(const TaskStatus_t *arr, UBaseType_t n
 static void stats_task(void *arg) {
     (void)arg;
 
-    /* Don't dump during the first window — prev counters are uninitialized.
-     * Just capture, then dump on the second tick onward. */
+    /* First window only captures; dump starts on second tick. */
     uint32_t next = osKernelGetTickCount();
 
     for (;;) {
@@ -107,7 +86,7 @@ static void stats_task(void *arg) {
                     uint32_t task_delta = cur->ulRunTimeCounter
                         - (prev ? prev->ulRunTimeCounter : 0);
 
-                    /* Use 64-bit multiply to avoid overflow when computing %. */
+                    /* 64-bit mul to avoid % overflow. */
                     uint32_t pct = (uint32_t)(((uint64_t)task_delta * 100u)
                                               / total_delta);
 
@@ -121,7 +100,7 @@ static void stats_task(void *arg) {
                            (unsigned)pct);
                 }
 
-                /* Total CPU load = 100 - idle %. Stored as uint8. */
+                /* load = 100 - idle%. */
                 uint32_t idle_pct = (uint32_t)(((uint64_t)idle_delta * 100u)
                                                / total_delta);
                 uint8_t  load_pct = (idle_pct >= 100u) ? 0u
@@ -134,7 +113,6 @@ static void stats_task(void *arg) {
             }
         }
 
-        /* Capture for next window. */
         memcpy(s_status_prev, s_status_now, sizeof(s_status_now[0]) * n_now);
         s_n_prev     = n_now;
         s_total_prev = total_now;

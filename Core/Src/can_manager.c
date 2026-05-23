@@ -16,14 +16,13 @@ typedef struct {
 } sub_entry_t;
 
 typedef struct {
-    can_bus_t          bus;          /* echoed for the dispatch task */
+    can_bus_t          bus;
     osMessageQueueId_t tx_q;
     osMessageQueueId_t rx_q;
     sub_entry_t        subs[MAX_SUBS_PER_BUS];
     volatile uint32_t  last_rx_tick;
 } bus_ctx_t;
 
-/* --- static allocation for two buses' TX/RX queues + the dispatch task --- */
 static bus_ctx_t g_bus[CAN_BUS_COUNT];
 
 static StaticTask_t s_disp_tcb;
@@ -48,7 +47,7 @@ void can_mgr_init(void) {
         .cb_size    = sizeof(s_disp_tcb),
         .stack_mem  = s_disp_stack,
         .stack_size = sizeof(s_disp_stack),
-        .priority   = osPriorityAboveNormal,    /* 4: matches detector task tier */
+        .priority   = osPriorityAboveNormal,    /* prio 4 */
     };
     s_disp_th = osThreadNew(rx_dispatch_task, NULL, &attr);
 }
@@ -56,7 +55,7 @@ void can_mgr_init(void) {
 bool can_mgr_send(can_bus_t bus, const can_frame_t *f, uint32_t timeout_ms) {
     if (bus >= CAN_BUS_COUNT) return false;
 
-    /* Fast path: try to hand directly to a free mailbox. */
+    /* Fast path: direct mailbox handoff. */
     taskENTER_CRITICAL();
     if (can_hw_tx_free(bus) > 0 && osMessageQueueGetCount(g_bus[bus].tx_q) == 0) {
         bool ok = can_hw_try_post(bus, f);
@@ -65,7 +64,7 @@ bool can_mgr_send(can_bus_t bus, const can_frame_t *f, uint32_t timeout_ms) {
     } else {
         taskEXIT_CRITICAL();
     }
-    /* Slow path: queue. ISR drains on TX-complete. */
+    /* Slow path: queue; ISR drains on TX-complete. */
     return osMessageQueuePut(g_bus[bus].tx_q, f, 0, timeout_ms) == osOK;
 }
 
@@ -78,8 +77,7 @@ bool can_mgr_subscribe(can_bus_t bus, uint32_t id, uint32_t mask, bool ext,
                 .id = id, .mask = mask, .ext = ext,
                 .in_use = true, .dest = dest_queue,
             };
-            /* Optimization later: coalesce subscribers' filters. For bring-up
-             * each subscribe consumes one HW filter bank. */
+            /* TODO: coalesce filters; today each subscribe burns one bank. */
             return can_hw_add_filter(bus, id, mask, ext) >= 0;
         }
     }
@@ -90,15 +88,14 @@ uint32_t can_mgr_last_rx_tick(can_bus_t bus) {
     return (bus < CAN_BUS_COUNT) ? g_bus[bus].last_rx_tick : 0;
 }
 
-/* --- ISR hooks ---------------------------------------------------------- */
+/* ---- ISR hooks ---- */
 
 void can_mgr_isr_rx_fifo0(can_bus_t bus) {
     can_frame_t f;
     BaseType_t  hpw = pdFALSE;
     while (can_hw_read_fifo0(bus, &f)) {
-        g_bus[bus].last_rx_tick = osKernelGetTickCount();   /* coarse — OK in ISR */
-        /* xQueueSendFromISR via CMSIS: osMessageQueuePut with timeout=0 is ISR-safe
-         * in CMSIS-RTOS v2 when called from ISR context. */
+        g_bus[bus].last_rx_tick = osKernelGetTickCount();
+        /* osMessageQueuePut(timeout=0) is ISR-safe in CMSIS-RTOS v2. */
         (void)osMessageQueuePut(g_bus[bus].rx_q, &f, 0, 0);
     }
     portYIELD_FROM_ISR(hpw);
@@ -109,16 +106,14 @@ void can_mgr_isr_tx_complete(can_bus_t bus) {
     while (can_hw_tx_free(bus) > 0) {
         if (osMessageQueueGet(g_bus[bus].tx_q, &f, NULL, 0) != osOK) break;
         if (!can_hw_try_post(bus, &f)) {
-            /* mailbox vanished between check and post — requeue at head not
-             * possible with FreeRTOS queues; tail-requeue is acceptable for
-             * non-ordered traffic. Revisit if we need strict ordering. */
+            /* Tail-requeue; FreeRTOS has no head-requeue. */
             (void)osMessageQueuePut(g_bus[bus].tx_q, &f, 0, 0);
             break;
         }
     }
 }
 
-/* --- RX dispatch task --------------------------------------------------- */
+/* ---- RX dispatch task ---- */
 
 static void rx_dispatch_task(void *arg) {
     (void)arg;
@@ -136,8 +131,7 @@ static void rx_dispatch_task(void *arg) {
                 }
             }
         }
-        /* Light sleep — the queues will get drained via the next wakeup.
-         * Replace with osThreadFlagsWait once we plumb a flag from the ISR. */
+        /* TODO: replace polling with osThreadFlagsWait from ISR. */
         osDelay(1);
     }
 }

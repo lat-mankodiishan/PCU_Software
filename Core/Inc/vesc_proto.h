@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "periph_wrappers.h"   /* can_frame_t */
+#include "periph_wrappers.h"
 
 #ifndef VESC_ID_SEND_CURR_DEM
 #define VESC_ID_SEND_CURR_DEM           0x101u
@@ -24,8 +24,7 @@
 #define VESC_ID_GET_RECT_STATE_CONCISE  0x201u
 #endif
 
-/* Motor type — must mirror VESC's mc_motor_type enum from datatypes.h.
- * Values are wire-protocol; do not renumber. */
+/* Wire values; mirrors VESC mc_motor_type. */
 typedef enum {
     VESC_MOTOR_TYPE_BLDC = 0,
     VESC_MOTOR_TYPE_DC   = 1,
@@ -33,7 +32,6 @@ typedef enum {
     VESC_MOTOR_TYPE_GPD  = 3,
 } vesc_motor_type_t;
 
-/* Powertrain mode — mirrors FC flight state, see control_law. */
 typedef enum {
     VESC_MODE_IDLE    = 0,
     VESC_MODE_TAKEOFF = 1,
@@ -43,8 +41,7 @@ typedef enum {
     VESC_MODE_FAULT   = 5,
 } vesc_mode_t;
 
-/* Rectifier control mode — picks which setpoint frame rectifier_task TXes.
- * Last-write-wins on the VESC side; the PCU emits only the matching ID. */
+/* Picks setpoint frame; VESC last-write-wins. */
 typedef enum {
     RECT_CTRL_CURRENT = 0,
     RECT_CTRL_OMEGA   = 1,
@@ -58,36 +55,36 @@ typedef struct {
 } vesc_curr_dem_t;
 
 typedef struct {
-    int32_t     omega_e_cmd_erpm;  /* 1 electrical-RPM/LSB, signed */
+    int32_t     omega_e_cmd_erpm;  /* 1 eRPM/LSB, signed */
     vesc_mode_t mode;
     uint8_t     seq;
 } vesc_omega_dem_t;
 
 typedef struct {
-    int16_t     duty_cmd_x10000;   /* 0.01 %/LSB; 10000 = 100 % duty, signed */
+    int16_t     duty_cmd_x10000;   /* 0.01 %/LSB, signed */
     vesc_mode_t mode;
     uint8_t     seq;
 } vesc_duty_dem_t;
 
 typedef struct {
-    vesc_motor_type_t motor_type;  /* VESC mc_motor_type — BLDC=0, DC=1, FOC=2, GPD=3 */
+    vesc_motor_type_t motor_type;
     vesc_mode_t       mode;
     uint8_t           seq;
 } vesc_motor_type_cmd_t;
 
 typedef struct {
-    bool        invert_direction;  /* false = normal, true = inverted */
+    bool        invert_direction;
     vesc_mode_t mode;
     uint8_t     seq;
 } vesc_invert_dir_cmd_t;
 
 typedef struct {
-    uint16_t V_dc_cV;              /* 0.01 V/LSB, unsigned, 0..655.35 V */
+    uint16_t V_dc_cV;              /* 0.01 V/LSB */
     int16_t  I_dc_cA;              /* 0.01 A/LSB, signed */
-    uint16_t gen_rpm;              /* 1 rpm/LSB */
-    int8_t   igbt_temp_C;          /* 1 °C/LSB */
-    uint8_t  fault_bits;           /* low 4 bits used (0..15) */
-    uint8_t  seq;                  /* low 4 bits used, wraps every 16 frames */
+    uint16_t gen_rpm;
+    int8_t   igbt_temp_C;
+    uint8_t  fault_bits;           /* low 4 bits */
+    uint8_t  seq;                  /* low 4 bits, wraps */
 } vesc_rect_state_t;
 
 typedef enum {

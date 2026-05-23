@@ -41,7 +41,7 @@ void rectifier_task_start(void) {
 
     can_mgr_subscribe(CAN_BUS_ENGINE,
                       VESC_ID_GET_RECT_STATE_CONCISE,
-                      0x7FFu,                    /* exact-match 11-bit */
+                      0x7FFu, /* exact-match 11-bit */
                       false,
                       s_rx_q);
 
@@ -56,10 +56,8 @@ void rectifier_task_start(void) {
     osThreadNew(rectifier_task, NULL, &tattr);
 }
 
-/* 0x104 SendMotorTypeCmd / 0x105 SendInvertDirCmd are sent on every change
- * AND every KEEPALIVE_TICKS as a keep-alive (covers frame loss).
- * VESC dedups, so spurious re-sends are no-ops. */
-#define MOTOR_TYPE_KEEPALIVE_TICKS  200u   /* 200 × 5 ms = 1 s */
+/* 0x104/0x105: on-change + 1 s keep-alive; VESC dedups. */
+#define MOTOR_TYPE_KEEPALIVE_TICKS  200u   /* 200 x 5 ms */
 #define INVERT_DIR_KEEPALIVE_TICKS  200u
 
 static void rectifier_task(void *arg) {
@@ -68,14 +66,14 @@ static void rectifier_task(void *arg) {
     uint8_t   mt_seq = 0;
     uint8_t   id_seq = 0;
     uint32_t  next = osKernelGetTickCount();
-    vesc_motor_type_t prev_mt = (vesc_motor_type_t)0xFFu;   /* force initial TX */
-    uint8_t           prev_id = 0xFFu;                      /* force initial TX */
+    vesc_motor_type_t prev_mt = (vesc_motor_type_t)0xFFu; /* force first TX */
+    uint8_t           prev_id = 0xFFu;                    /* force first TX */
     uint32_t mt_ticks_since_tx = MOTOR_TYPE_KEEPALIVE_TICKS;
     uint32_t id_ticks_since_tx = INVERT_DIR_KEEPALIVE_TICKS;
     can_frame_t f;
 
     for (;;) {
-        /* --- RX drain ------------------------------------------------- */
+        /* ---- RX drain ---- */
         while (osMessageQueueGet(s_rx_q, &f, NULL, 0) == osOK) {
             vesc_rect_state_t s;
             if (vesc_proto_decode_rect_state_concise(&f, &s) != VESC_DECODE_OK)
@@ -87,10 +85,7 @@ static void rectifier_task(void *arg) {
             pt_clear_fault(FAULT_RECT_STALE);
         }
 
-        /* --- TX setpoint snapshot, hardware-of-last-resort clamp ------
-         * Pick the frame to encode based on rect_ctrl_mode. The PCU emits
-         * exactly one of {0x101, 0x102, 0x103} per tick — VESC last-write-
-         * wins, but at 200 Hz only one is being written. */
+        /* ---- TX snapshot + clamp; one of 0x101/0x102/0x103 per tick ---- */
         rect_ctrl_mode_t mode_now;
         int16_t   I_cA_now;
         int32_t   omega_now;
@@ -133,7 +128,7 @@ static void rectifier_task(void *arg) {
         }
         (void)can_mgr_send(CAN_BUS_ENGINE, &tx, 0);
 
-        /* --- 0x104 SendMotorTypeCmd: on-change + keep-alive ----------- */
+        /* ---- 0x104 motor-type: on-change + keep-alive ---- */
         mt_ticks_since_tx++;
         if (mt_now != prev_mt || mt_ticks_since_tx >= MOTOR_TYPE_KEEPALIVE_TICKS) {
             vesc_motor_type_cmd_t mt_cmd = {
@@ -148,7 +143,7 @@ static void rectifier_task(void *arg) {
             mt_ticks_since_tx = 0;
         }
 
-        /* --- 0x105 SendInvertDirCmd: on-change + keep-alive ----------- */
+        /* ---- 0x105 invert-dir: on-change + keep-alive ---- */
         id_ticks_since_tx++;
         if (id_now != prev_id || id_ticks_since_tx >= INVERT_DIR_KEEPALIVE_TICKS) {
             vesc_invert_dir_cmd_t id_cmd = {
@@ -163,7 +158,7 @@ static void rectifier_task(void *arg) {
             id_ticks_since_tx = 0;
         }
 
-        /* --- Staleness check ------------------------------------------ */
+        /* ---- Staleness check ---- */
         osMutexAcquire(g_pt_mtx, osWaitForever);
         uint32_t last = g_pt.rect_state_tick;
         osMutexRelease(g_pt_mtx);

@@ -53,7 +53,6 @@ void ADC_RReg(uint8_t reg, uint8_t *data, uint8_t num_reg){
     ADC_SetCS(1);
 }
 
-//hardware reset
 void ADC_Reset(void){
     HAL_GPIO_WritePin(ADC_RST_GPIO_Port, ADC_RST_Pin, GPIO_PIN_RESET);
     HAL_Delay(1);
@@ -199,10 +198,7 @@ void ADC_Init(const ADC_ChannelConfig_t *ch, uint8_t num_ch, ADC_SPS_t sps, ADC_
 	ADC_WReg(ADC_REG_MODE0, ADC_DELAY_17US << 0);
 	ADC_WReg(ADC_REG_MODE1, (filt << 5));
 	ADC_SetChannel(0);
-	/* REFMUX = RMUXP<<3 | RMUXN. 100b/100b = AVDD/AVSS as the reference pair
-	 * → full-scale differential = AVDD (≈ 5 V). Required when measuring
-	 * ratiometric current sensors (ACS772) whose 0.5–4.5 V swing would
-	 * saturate the internal 2.5 V reference. */
+	/* REFMUX = AVDD/AVSS pair (~5 V FS) for ratiometric ACS772 sensors. */
 	ADC_WReg(ADC_REG_REFMUX, 0x24);
 	ADC_StartADC();
 }

@@ -7,19 +7,16 @@
 #include <stdint.h>
 
 #define SENSOR_NUM_TC      3
-#define SENSOR_NUM_ADC_CH  3       /* AIN0..AIN2 = ACS772 I_1..I_3 (single-ended vs AINCOM-bodged-to-GND) */
+#define SENSOR_NUM_ADC_CH  3       /* AIN0..AIN2 = ACS772 I_1..I_3 */
 
 typedef struct {
     ADC_ScanResult_t adc;
     TC_Reading_t     tc[SENSOR_NUM_TC];
     bool             tc_valid[SENSOR_NUM_TC];
-    uint32_t         tick;          /* osKernelGetTickCount() of last update */
+    uint32_t         tick;
 } sensor_data_t;
 
-/* Create the sensor task. Call after pt_init(), before osKernelStart(). */
 void sensor_task_start(void);
-
-/* Mutex-protected snapshot of the latest readings. */
 void sensor_data_get(sensor_data_t *out);
 
 #endif /* SENSOR_TASK_H */

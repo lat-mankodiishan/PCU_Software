@@ -48,8 +48,7 @@ static void pick_filename(void) {
 static void log_task(void *arg) {
     (void)arg;
 
-    /* Mount + open + header. On any failure, fall through to a quiet idle
-     * loop — log_task is non-essential, must never block other tasks. */
+    /* On any FS failure, idle quietly; log is non-essential. */
     if (f_mount(&s_fs, "", 1) != FR_OK) {
         for (;;) osDelay(1000);
     }
@@ -83,8 +82,7 @@ static void log_task(void *arg) {
         sensor_data_t sd;
         sensor_data_get(&sd);
 
-        /* tc temps written as int32 cdeg (×100 °C) to avoid pulling
-         * printf-float into the link. Decode by /100 in post-proc. */
+        /* TC temps as int32 cdeg (x100 C) to avoid printf-float linkage. */
         const char *expt_label = pt.expt_label ? pt.expt_label : "";
 
         int n = snprintf(s_line, sizeof(s_line),
@@ -129,14 +127,13 @@ static void log_task(void *arg) {
             (long)pt.dyno_current_mA,
             (long)pt.dyno_vbus_mV,
             (unsigned long)pt.dyno_power_dW,
-            /* energy is uint64 but %llu pulls in newlib (not -nano);
-             * truncate to 32 bits — 4 GWh is far past any bench run. */
+            /* uint64 truncated to u32 (4 GWh ceiling > bench needs). */
             (unsigned long)pt.dyno_energy_Wh,
             (unsigned long)pt.dyno_input_tick,
             (long)pt.dyno_load_current_mA,
             (long)pt.dyno_load_vbus_mV,
             (unsigned long)pt.dyno_load_power_dW,
-            (unsigned long)pt.dyno_load_energy_Wh,   /* truncated to u32, see note */
+            (unsigned long)pt.dyno_load_energy_Wh,
             (unsigned long)pt.dyno_load_input_tick,
             (unsigned)pt.throttle_ctrl_enabled,
             (unsigned)pt.throttle_pwm_duty,

@@ -5,10 +5,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-/* Boot profile. Profiles available:
- *   &starter_gen_profile          — BLDC 5%% crank, FOC inverted duty ladder 10/14/18%%.
- *   &engine_throttle_sweep_profile — BLDC 42%% crank, FOC inverted 60%% for 10 s,
- *                                    75%% for 100 s. Operator varies engine throttle. */
+/* Available: &starter_gen_profile, &engine_throttle_sweep_profile. */
 #define EXPT_BOOT_PROFILE   (&engine_throttle_sweep_profile)
 
 static StaticTask_t s_tcb;
@@ -31,25 +28,17 @@ void expt_task_start(void) {
 static void expt_task(void *arg) {
     (void)arg;
 
-    /* Brief startup grace so BMS / rectifier / sensor tasks come up first
-     * — keeps us from publishing setpoints before subscribers are listening. */
+    /* Startup grace; let subscribers come up first. */
     osDelay(500);
 
-    /* Defensive boot clear — never auto-start after reset, regardless of
-     * what RAM held. pt_init() already zeros g_pt; this is belt-and-
-     * suspenders for the case where a live-watch value persists across a
-     * "stop debug" that didn't actually reset the chip. */
+    /* Defensive boot clear; guards live-watch values surviving non-reset. */
     osMutexAcquire(g_pt_mtx, osWaitForever);
     g_pt.expt_start_req   = false;
     g_pt.expt_advance_req = false;
     g_pt.expt_abort_req   = false;
     osMutexRelease(g_pt_mtx);
 
-    /* Edge-triggered start: only a false → true transition triggers a run.
-     * Initialize prev_start = true so the first poll must observe false
-     * before any subsequent true counts as an edge. After a run, we force
-     * prev_start back to true so the operator must explicitly toggle the
-     * flag low and high again to replay. */
+    /* Edge-triggered start: false->true triggers a run. */
     bool prev_start = true;
 
     for (;;) {
@@ -59,14 +48,12 @@ static void expt_task(void *arg) {
         osMutexRelease(g_pt_mtx);
 
         if (!prev_start && cur_start) {
-            /* false → true edge: consume the flag and run. */
             osMutexAcquire(g_pt_mtx, osWaitForever);
             g_pt.expt_start_req = false;
             osMutexRelease(g_pt_mtx);
 
             expt_run(EXPT_BOOT_PROFILE);
 
-            /* Re-arm only after another false→true cycle. */
             prev_start = true;
         } else {
             prev_start = cur_start;
