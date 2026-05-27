@@ -11,8 +11,10 @@ static StaticSemaphore_t s_pt_mtx_cb;
 
 void pt_init(void) {
     memset(&g_pt, 0, sizeof(g_pt));
-    g_pt.mode            = VESC_MODE_IDLE;
-    g_pt.rect_motor_type = VESC_MOTOR_TYPE_FOC;
+    g_pt.mode             = MODE_IDLE;
+    g_pt.engine_state     = ENGINE_OFF;
+    g_pt.engine_state_req = ENGINE_STATE_REQ_NONE;
+    g_pt.rect_motor_type  = VESC_MOTOR_TYPE_FOC;
     g_pt.engine_throttle_pulse_us = ENGINE_THROTTLE_PULSE_MIN_US;
 
     static const osMutexAttr_t attr = {
@@ -27,7 +29,7 @@ void pt_init(void) {
     esc_hw_init(ESC_CH_ENGINE, ENGINE_THROTTLE_PULSE_MIN_US);
 }
 
-void pt_set_setpoint(int16_t I_rect_cmd_cA, vesc_mode_t mode) {
+void pt_set_setpoint(int16_t I_rect_cmd_cA, flight_mode_t mode) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
     g_pt.rect_ctrl_mode = RECT_CTRL_CURRENT;
     g_pt.I_rect_cmd_cA  = I_rect_cmd_cA;
@@ -35,7 +37,7 @@ void pt_set_setpoint(int16_t I_rect_cmd_cA, vesc_mode_t mode) {
     osMutexRelease(g_pt_mtx);
 }
 
-void pt_set_setpoint_omega(int32_t omega_e_cmd_erpm, vesc_mode_t mode) {
+void pt_set_setpoint_omega(int32_t omega_e_cmd_erpm, flight_mode_t mode) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
     g_pt.rect_ctrl_mode    = RECT_CTRL_OMEGA;
     g_pt.omega_e_cmd_erpm  = omega_e_cmd_erpm;
@@ -43,7 +45,7 @@ void pt_set_setpoint_omega(int32_t omega_e_cmd_erpm, vesc_mode_t mode) {
     osMutexRelease(g_pt_mtx);
 }
 
-void pt_set_setpoint_duty(int16_t duty_cmd_x10000, vesc_mode_t mode) {
+void pt_set_setpoint_duty(int16_t duty_cmd_x10000, flight_mode_t mode) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
     g_pt.rect_ctrl_mode    = RECT_CTRL_DUTY;
     g_pt.duty_cmd_x10000   = duty_cmd_x10000;
@@ -98,7 +100,7 @@ uint16_t pt_get_faults(void) {
     return v;
 }
 
-void pt_set_fc_inputs(vesc_mode_t flight_state, uint16_t throttle_dem_pct) {
+void pt_set_fc_inputs(flight_mode_t flight_state, uint16_t throttle_dem_pct) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
     g_pt.fc_flight_state     = flight_state;
     g_pt.fc_throttle_dem_pct = throttle_dem_pct;
@@ -106,10 +108,17 @@ void pt_set_fc_inputs(vesc_mode_t flight_state, uint16_t throttle_dem_pct) {
     osMutexRelease(g_pt_mtx);
 }
 
-void pt_set_bms_inputs(uint16_t soc_pct) {
+void pt_set_engine_state(engine_state_t s) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.bms_soc_pct     = soc_pct;
-    g_pt.bms_input_tick  = osKernelGetTickCount();
+    g_pt.engine_state      = s;
+    g_pt.engine_state_tick = osKernelGetTickCount();
+    osMutexRelease(g_pt_mtx);
+}
+
+void pt_request_engine_state(engine_state_t s) {
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    g_pt.engine_state_req      = s;
+    g_pt.engine_state_req_tick = osKernelGetTickCount();
     osMutexRelease(g_pt_mtx);
 }
 

@@ -33,13 +33,13 @@ typedef enum {
 } vesc_motor_type_t;
 
 typedef enum {
-    VESC_MODE_IDLE    = 0,
-    VESC_MODE_TAKEOFF = 1,
-    VESC_MODE_CLIMB   = 2,
-    VESC_MODE_CRUISE  = 3,
-    VESC_MODE_LAND    = 4,
-    VESC_MODE_FAULT   = 5,
-} vesc_mode_t;
+    MODE_IDLE    = 0,
+    MODE_TAKEOFF = 1,
+    MODE_CLIMB   = 2,
+    MODE_CRUISE  = 3,
+    MODE_LAND    = 4,
+    MODE_FAULT   = 5,
+} flight_mode_t;
 
 /* Picks setpoint frame; VESC last-write-wins. */
 typedef enum {
@@ -50,31 +50,31 @@ typedef enum {
 
 typedef struct {
     int16_t     I_rect_cmd_cA;     /* 0.01 A/LSB, signed */
-    vesc_mode_t mode;
+    flight_mode_t mode;
     uint8_t     seq;
 } vesc_curr_dem_t;
 
 typedef struct {
     int32_t     omega_e_cmd_erpm;  /* 1 eRPM/LSB, signed */
-    vesc_mode_t mode;
+    flight_mode_t mode;
     uint8_t     seq;
 } vesc_omega_dem_t;
 
 typedef struct {
     int16_t     duty_cmd_x10000;   /* 0.01 %/LSB, signed */
-    vesc_mode_t mode;
+    flight_mode_t mode;
     uint8_t     seq;
 } vesc_duty_dem_t;
 
 typedef struct {
     vesc_motor_type_t motor_type;
-    vesc_mode_t       mode;
+    flight_mode_t       mode;
     uint8_t           seq;
 } vesc_motor_type_cmd_t;
 
 typedef struct {
     bool        invert_direction;
-    vesc_mode_t mode;
+    flight_mode_t mode;
     uint8_t     seq;
 } vesc_invert_dir_cmd_t;
 

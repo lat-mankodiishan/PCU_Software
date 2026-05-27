@@ -7,7 +7,7 @@
 #include "semphr.h"
 #include <string.h>
 
-#define SENSOR_PERIOD_MS   100       /* 10 Hz */
+#define SENSOR_PERIOD_MS   200       /* 1 Hz */
 
 static StaticTask_t      s_tcb;
 static StackType_t       s_stack[384];        /* 1.5 KB */
@@ -99,6 +99,15 @@ static void sensor_task(void *arg) {
             s_data.tc_valid[i] = ok;
             osMutexRelease(s_mtx);
         }
+
+        /* Mirror TC readings into g_pt. */
+        osMutexAcquire(g_pt_mtx, osWaitForever);
+        for (uint8_t i = 0; i < SENSOR_NUM_TC && i < 3; ++i) {
+            g_pt.tc_C[i]     = (int16_t)s_data.tc[i].tc_temp;
+            g_pt.tc_valid[i] = s_data.tc_valid[i];
+        }
+        g_pt.tc_input_tick = osKernelGetTickCount();
+        osMutexRelease(g_pt_mtx);
 
         osMutexAcquire(s_mtx, osWaitForever);
         s_data.tick = osKernelGetTickCount();

@@ -35,10 +35,8 @@
 #include "fc_link_task.h"
 #include "bms_task.h"
 #include "ecu_task.h"
-#include "experiment_task.h"
-#include "dyno_setup_task.h"
-#include "throttle_ctrl_task.h"
-#include "control_law_test.h"
+#include "dyno_sweep_task.h"
+#include "dyno_load_task.h"
 #include "periph_wrappers.h"
 #include "rtos_stats.h"
 
@@ -149,7 +147,6 @@ void vApplicationMallocFailedHook(void)
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
-  //control_law_self_test();
 
   /* USER CODE END Init */
 
@@ -180,10 +177,9 @@ void MX_FREERTOS_Init(void) {
   can_mgr_init();
   rectifier_task_start();
   supervisor_task_start();
-  expt_task_start();
-  dyno_setup_task_start();
-  throttle_ctrl_task_start();
-  // pdb_task_start();
+  dyno_sweep_task_start();
+  // dyno_load_task_start();   /* re-enable when load fan bench is wired */
+  pdb_task_start();
   sensor_task_start();
   log_task_start();
   fc_link_task_start();
@@ -215,9 +211,7 @@ void StartDefaultTask(void *argument)
   osDelay(1000);
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET);
 
-  /* supervisor_task is now the sole writer of pt_set_setpoint (running
-   * the I_bat closed-loop — see USE_IBAT_CONTROL_LAW in supervisor_task.c)
-   * and the sole watchdog kicker. defaultTask just stays alive. */
+  /* supervisor_task owns pt_set_setpoint + watchdog kicks; defaultTask idles. */
   for(;;)
   {
     osDelay(1000);

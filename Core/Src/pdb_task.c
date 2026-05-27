@@ -6,7 +6,7 @@
 #include "task.h"
 
 #define PDB_PERIOD_MS         20      /* 50 Hz */
-#define PDB_SUP_HANG_MS      100
+#define PDB_SUP_HANG_MS     1000      /* supervisor at 5 Hz: 5x margin on heartbeat */
 
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[256];     /* 1 KB */

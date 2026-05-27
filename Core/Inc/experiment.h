@@ -36,7 +36,7 @@ typedef struct {
     expt_cond_fn      hold_cond;
     expt_motor_type_t motor_type;    /* 0x104 motor_type; KEEP = no-op */
     expt_invert_dir_t invert_dir;    /* 0x105 invert dir; KEEP = no-op */
-    vesc_mode_t       pt_mode;
+    flight_mode_t       pt_mode;
     const char       *label;         /* CSV-safe (no commas) */
 } expt_phase_t;
 

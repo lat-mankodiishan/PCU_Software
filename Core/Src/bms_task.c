@@ -1,4 +1,5 @@
-/* bms_task — placeholder BMS RX, 10 Hz, listens on CAN_BUS_ENGINE for F405. */
+/* bms_task — parked; battery telemetry comes from FC-side Hobbywing ESC telem. */
+#if 0
 
 #include "bms_task.h"
 #include "can_manager.h"
@@ -90,3 +91,5 @@ static void bms_task(void *arg) {
         osDelayUntil(next);
     }
 }
+
+#endif /* #if 0 — task disabled, see top-of-file note */

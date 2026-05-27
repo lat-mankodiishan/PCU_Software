@@ -90,7 +90,7 @@ static void rectifier_task(void *arg) {
         int16_t   I_cA_now;
         int32_t   omega_now;
         int16_t   duty_now;
-        vesc_mode_t pt_mode;
+        flight_mode_t pt_mode;
         vesc_motor_type_t mt_now;
         uint8_t   id_now;
         osMutexAcquire(g_pt_mtx, osWaitForever);

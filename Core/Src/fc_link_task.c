@@ -3,22 +3,19 @@
 #include "fc_link_task.h"
 
 /* No-op stub until dronecan_dsdlc + libcanard are present. */
-#if __has_include("canard.h") && __has_include("dsdl.lat.powertrain.PTConcise.h")
+#if __has_include("canard.h") && __has_include("uavcan.protocol.NodeStatus.h")
 
 #include "can_manager.h"
 #include "periph_wrappers.h"
 #include "powertrain_state.h"
 #include "sensor_task.h"
 #include "canard.h"
-#include "dsdl.lat.powertrain.PTConcise.h"
-#include "dsdl.lat.powertrain.ThrottleDemand.h"
 #include "uavcan.protocol.NodeStatus.h"
 #include "uavcan.protocol.GetNodeInfo_req.h"
 #include "uavcan.protocol.GetNodeInfo_res.h"
-#include "uavcan.equipment.power.BatteryInfo.h"
 #include "uavcan.equipment.esc.RawCommand.h"
-#include "uavcan.equipment.ice.reciprocating.Status.h"
-#include "uavcan.equipment.ice.FuelTankStatus.h"
+#include "uavcan.equipment.actuator.ArrayCommand.h"
+#include "uavcan.equipment.actuator.Command.h"
 #include "uavcan.protocol.param.GetSet_req.h"
 #include "uavcan.protocol.param.GetSet_res.h"
 #include "uavcan.protocol.param.Value.h"
@@ -33,11 +30,28 @@
 
 #define FC_LINK_PERIOD_MS         50            /* 20 Hz */
 #define FC_LINK_HEARTBEAT_MS    1000            /* 1 Hz NodeStatus */
-#define FC_LINK_PT_PERIOD_MS      50            /* 20 Hz PTConcise */
-#define FC_LINK_BATT_PERIOD_MS   100            /* 10 Hz */
-#define FC_LINK_ICE_PERIOD_MS    100            /* 10 Hz -> EFI_STATUS MAVLink */
-#define FC_LINK_FUEL_PERIOD_MS  1000            /*  1 Hz */
+#define FC_LINK_FLEX_PERIOD_MS   200            /*  5 Hz FlexDebug batch */
 #define FC_LINK_FC_STALE_MS     1000
+
+/* dronecan.protocol.FlexDebug — DTID 16371, single-frame float32 per id.
+ * AP needs CAN_D1_UC_OPTION |= 512 (ENABLE_FLEX_DEBUG) to cache for Lua. */
+#define FLEXDEBUG_ID                16371u
+#define FLEXDEBUG_SIGNATURE         0xECA60382FF038F39ULL
+#define FLEXDEBUG_MAX_FRAME_PAYLOAD 7u           /* 8 - 1 tail byte */
+
+/* Per-field FlexDebug message IDs — must match pcu_telem.lua on the FC. */
+#define FLEX_ID_DUT  1u
+#define FLEX_ID_THR  2u
+#define FLEX_ID_IRS  3u
+#define FLEX_ID_IRM  4u
+#define FLEX_ID_VDC  5u
+#define FLEX_ID_IBF  6u
+#define FLEX_ID_IBR  7u
+#define FLEX_ID_RPM  8u
+#define FLEX_ID_IGT  9u
+#define FLEX_ID_PRC 10u
+#define FLEX_ID_EST 11u
+#define FLEX_ID_FLT 12u
 
 #define FC_LINK_RX_QUEUE_DEPTH    64
 #define FC_LINK_MEM_POOL_BYTES  8192
@@ -51,9 +65,19 @@
 /* STM32F4 96-bit UID; first 12 of 16 unique_id bytes, rest zero. */
 #define STM32_UID_BASE             0x1FFF7A10UL
 
-/* RawCommand int14 indexed by ESC channel; AP CAN_D1_UC_ESC_BM bit N -> chan N+1. */
-#define FC_LINK_ESC_INDEX          0u
+/* RawCommand int14 indexed by ESC channel; AP CAN_D1_UC_ESC_BM bit N -> chan N+1.
+ * Copter: average all channels present. Per-motor commands carry attitude trim
+ * which cancels out across the rotor array, leaving collective throttle. */
 #define FC_LINK_ESC_RAW_MAX        8191    /* int14 forward full-scale */
+
+/* ArrayCommand actuator_id 8 = engine_state from Lua RC bridge (SERVO8 via
+ * CAN_D1_UC_SRV_BM). Not motor-arming-gated. AP sends UNITLESS [-1,+1] by
+ * default, or PWM (us) if CAN_D1_UC_OPTION USE_ACTUATOR_PWM bit is set. */
+#define FC_LINK_ESTATE_ACTUATOR_ID         8u
+#define FC_LINK_ESTATE_UNITLESS_CRANK_LO  (-0.5f)
+#define FC_LINK_ESTATE_UNITLESS_RUN_LO     (0.5f)
+#define FC_LINK_ESTATE_PWM_CRANK_LO        1300.0f
+#define FC_LINK_ESTATE_PWM_RUN_LO          1700.0f
 
 static StaticTask_t       s_tcb;
 static StackType_t        s_stack[512];          /* 2 KB */
@@ -65,38 +89,31 @@ static osMessageQueueId_t s_rx_q;
 static uint8_t            s_mem_pool[FC_LINK_MEM_POOL_BYTES];
 static CanardInstance     s_canard;
 
-static uint8_t            s_tid_pt     = 0;
 static uint8_t            s_tid_status = 0;
-static uint8_t            s_tid_batt   = 0;
-static uint8_t            s_tid_ice    = 0;
-static uint8_t            s_tid_fuel   = 0;
+static uint8_t            s_tid_flex   = 0;
 
 static volatile uint32_t  s_fc_last_status_tick = 0;
 static uint32_t           s_boot_tick           = 0;
 
 /* DEBUG: per-DTID receive counters. */
-volatile uint32_t g_fc_link_rx_nodestatus  = 0;
-volatile uint32_t g_fc_link_rx_throttle    = 0;
-volatile uint32_t g_fc_link_rx_rawcommand  = 0;
-volatile uint32_t g_fc_link_rx_total       = 0;
+volatile uint32_t g_fc_link_rx_nodestatus    = 0;
+volatile uint32_t g_fc_link_rx_rawcommand    = 0;
+volatile uint32_t g_fc_link_rx_arraycommand  = 0;
+volatile uint32_t g_fc_link_rx_total         = 0;
+
+/* DEBUG: last engine-state command value seen on actuator_id 8 (for bench tuning
+ * the band thresholds). type=0 unitless, type=4 PWM us. */
+volatile uint8_t  g_fc_link_estate_cmd_type  = 0;
+volatile float    g_fc_link_estate_cmd_value = 0.0f;
 
 /* GCS-settable flight_state, index 0, via uavcan.protocol.param.GetSet. */
-volatile int8_t g_pcu_param_flight_state = (int8_t)VESC_MODE_IDLE;
+volatile int8_t g_pcu_param_flight_state = (int8_t)MODE_IDLE;
 
 /* DEBUG: GetSet service path counters. */
 volatile uint32_t g_pcu_should_accept_param = 0;
 volatile uint32_t g_pcu_param_handler_calls = 0;
 volatile uint32_t g_pcu_param_set_count    = 0;
 volatile uint32_t g_pcu_param_resp_rc      = 0;
-
-/* DEBUG: per-publication counters. */
-volatile uint32_t g_pub_ice_calls          = 0;
-volatile  int32_t g_pub_ice_last_rc        = 0;
-volatile uint32_t g_pub_ice_encoded_bytes  = 0;
-volatile uint32_t g_pub_fuel_calls         = 0;
-volatile  int32_t g_pub_fuel_last_rc       = 0;
-volatile uint32_t g_pub_batt_calls         = 0;
-volatile  int32_t g_pub_batt_last_rc       = 0;
 
 /* ---- libcanard callbacks ---- */
 
@@ -108,12 +125,12 @@ static bool should_accept(const CanardInstance *ins,
     (void)ins; (void)source_node_id;
 
     if (transfer_type == CanardTransferTypeBroadcast) {
-        if (data_type_id == DSDL_LAT_POWERTRAIN_THROTTLEDEMAND_ID) {
-            *out_signature = DSDL_LAT_POWERTRAIN_THROTTLEDEMAND_SIGNATURE;
-            return true;
-        }
         if (data_type_id == UAVCAN_EQUIPMENT_ESC_RAWCOMMAND_ID) {
             *out_signature = UAVCAN_EQUIPMENT_ESC_RAWCOMMAND_SIGNATURE;
+            return true;
+        }
+        if (data_type_id == UAVCAN_EQUIPMENT_ACTUATOR_ARRAYCOMMAND_ID) {
+            *out_signature = UAVCAN_EQUIPMENT_ACTUATOR_ARRAYCOMMAND_SIGNATURE;
             return true;
         }
         if (data_type_id == UAVCAN_PROTOCOL_NODESTATUS_ID) {
@@ -177,9 +194,13 @@ static void handle_get_node_info(const CanardRxTransfer *req) {
                            buf, len);
 }
 
-/* Index 0: flight_state int8 [0..VESC_MODE_FAULT]. */
+/* Index 0: flight_state int8 [0..MODE_FAULT]. */
 #define FC_LINK_PARAM_FLIGHT_STATE_NAME      "flight_state"
 #define FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN  (sizeof(FC_LINK_PARAM_FLIGHT_STATE_NAME) - 1)
+
+/* Index 1: engine_state int8 [0..ENGINE_FAULT]; written via pt_set_engine_state(). */
+#define FC_LINK_PARAM_ENGINE_STATE_NAME      "engine_state"
+#define FC_LINK_PARAM_ENGINE_STATE_NAME_LEN  (sizeof(FC_LINK_PARAM_ENGINE_STATE_NAME) - 1)
 
 static void handle_param_get_set(const CanardRxTransfer *req) {
     g_pcu_param_handler_calls++;
@@ -193,18 +214,24 @@ static void handle_param_get_set(const CanardRxTransfer *req) {
     memset(&rsp, 0, sizeof(rsp));
 
     /* Prefer name match; fall back to index when name empty. */
-    bool by_name = (greq.name.len == FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN) &&
-                   (memcmp(greq.name.data,
-                           FC_LINK_PARAM_FLIGHT_STATE_NAME,
-                           FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN) == 0);
-    bool by_index = (greq.name.len == 0) && (greq.index == 0);
+    bool match_flight = ((greq.name.len == FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN) &&
+                         (memcmp(greq.name.data,
+                                 FC_LINK_PARAM_FLIGHT_STATE_NAME,
+                                 FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN) == 0))
+                     || ((greq.name.len == 0) && (greq.index == 0));
 
-    if (by_name || by_index) {
+    bool match_engine = ((greq.name.len == FC_LINK_PARAM_ENGINE_STATE_NAME_LEN) &&
+                         (memcmp(greq.name.data,
+                                 FC_LINK_PARAM_ENGINE_STATE_NAME,
+                                 FC_LINK_PARAM_ENGINE_STATE_NAME_LEN) == 0))
+                     || ((greq.name.len == 0) && (greq.index == 1));
+
+    if (match_flight) {
         /* SET when value tag != EMPTY; we accept INTEGER only. */
         if (greq.value.union_tag == UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE) {
             int64_t v = greq.value.integer_value;
             if (v < 0)                    v = 0;
-            if (v > (int64_t)VESC_MODE_FAULT) v = (int64_t)VESC_MODE_FAULT;
+            if (v > (int64_t)MODE_FAULT) v = (int64_t)MODE_FAULT;
             g_pcu_param_flight_state = (int8_t)v;
             g_pcu_param_set_count++;
         }
@@ -219,6 +246,31 @@ static void handle_param_get_set(const CanardRxTransfer *req) {
         memcpy(rsp.name.data,
                FC_LINK_PARAM_FLIGHT_STATE_NAME,
                FC_LINK_PARAM_FLIGHT_STATE_NAME_LEN);
+    } else if (match_engine) {
+        if (greq.value.union_tag == UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE) {
+            int64_t v = greq.value.integer_value;
+            if (v < 0)                       v = 0;
+            if (v > (int64_t)ENGINE_FAULT)  v = (int64_t)ENGINE_FAULT;
+            /* Use request path so supervisor fires the swap+prime sequence on
+             * CRANK->RUN regardless of source (MP, Lua RC, Live Watch). */
+            pt_request_engine_state((engine_state_t)v);
+            g_pcu_param_set_count++;
+        }
+
+        engine_state_t cur;
+        osMutexAcquire(g_pt_mtx, osWaitForever);
+        cur = g_pt.engine_state;
+        osMutexRelease(g_pt_mtx);
+
+        rsp.value.union_tag         = UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE;
+        rsp.value.integer_value     = (int64_t)cur;
+        rsp.default_value.union_tag = UAVCAN_PROTOCOL_PARAM_VALUE_EMPTY;
+        rsp.max_value.union_tag     = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_EMPTY;
+        rsp.min_value.union_tag     = UAVCAN_PROTOCOL_PARAM_NUMERICVALUE_EMPTY;
+        rsp.name.len = FC_LINK_PARAM_ENGINE_STATE_NAME_LEN;
+        memcpy(rsp.name.data,
+               FC_LINK_PARAM_ENGINE_STATE_NAME,
+               FC_LINK_PARAM_ENGINE_STATE_NAME_LEN);
     } else {
         /* Empty response signals end-of-list. */
         rsp.value.union_tag         = UAVCAN_PROTOCOL_PARAM_VALUE_EMPTY;
@@ -262,33 +314,53 @@ static void on_transfer_received(CanardInstance    *ins,
 
     if (transfer->transfer_type != CanardTransferTypeBroadcast) return;
 
-    if (transfer->data_type_id == DSDL_LAT_POWERTRAIN_THROTTLEDEMAND_ID) {
-        g_fc_link_rx_throttle++;
-        struct dsdl_lat_powertrain_ThrottleDemand msg;
-        /* decoder returns false on success. */
-        if (!dsdl_lat_powertrain_ThrottleDemand_decode(transfer, &msg)) {
-            /* flight_phase enum == vesc_mode_t. */
-            vesc_mode_t mode  = (vesc_mode_t)msg.flight_phase;
-            uint16_t    thr   = (uint16_t)(msg.throttle_pct * 100.0f);
-            if (thr > 10000) thr = 10000;
+    if (transfer->data_type_id == UAVCAN_EQUIPMENT_ESC_RAWCOMMAND_ID) {
+        g_fc_link_rx_rawcommand++;
+        struct uavcan_equipment_esc_RawCommand msg;
+        if (!uavcan_equipment_esc_RawCommand_decode(transfer, &msg) &&
+            msg.cmd.len > 0u) {
+            /* Sum forward-clamped channels, divide by count -> collective. */
+            uint32_t sum = 0u;
+            for (uint8_t i = 0; i < msg.cmd.len; i++) {
+                int16_t raw = msg.cmd.data[i];
+                if (raw < 0)                    raw = 0;
+                if (raw > FC_LINK_ESC_RAW_MAX)  raw = FC_LINK_ESC_RAW_MAX;
+                sum += (uint32_t)raw;
+            }
+            uint32_t avg_raw = sum / msg.cmd.len;
+            /* int14 0..8191 -> 0..10000 (0.01 %/LSB). */
+            uint16_t thr = (uint16_t)((avg_raw * 10000u) / FC_LINK_ESC_RAW_MAX);
+            /* Flight state from GCS param, not throttle channel. */
+            flight_mode_t mode = (flight_mode_t)g_pcu_param_flight_state;
             pt_set_fc_inputs(mode, thr);
         }
     }
-    else if (transfer->data_type_id == UAVCAN_EQUIPMENT_ESC_RAWCOMMAND_ID) {
-        g_fc_link_rx_rawcommand++;
-        struct uavcan_equipment_esc_RawCommand msg;
-        if (!uavcan_equipment_esc_RawCommand_decode(transfer, &msg)) {
-            if (msg.cmd.len > FC_LINK_ESC_INDEX) {
-                int16_t raw = msg.cmd.data[FC_LINK_ESC_INDEX];
-                /* Clamp to forward range; no reverse for generator. */
-                if (raw < 0)                    raw = 0;
-                if (raw > FC_LINK_ESC_RAW_MAX)  raw = FC_LINK_ESC_RAW_MAX;
-                /* int14 0..8191 -> 0..10000 (0.01 %/LSB). */
-                uint16_t thr = (uint16_t)(((uint32_t)raw * 10000u)
-                                          / FC_LINK_ESC_RAW_MAX);
-                /* Flight state from GCS param, not throttle channel. */
-                vesc_mode_t mode = (vesc_mode_t)g_pcu_param_flight_state;
-                pt_set_fc_inputs(mode, thr);
+    else if (transfer->data_type_id == UAVCAN_EQUIPMENT_ACTUATOR_ARRAYCOMMAND_ID) {
+        g_fc_link_rx_arraycommand++;
+        struct uavcan_equipment_actuator_ArrayCommand msg;
+        if (!uavcan_equipment_actuator_ArrayCommand_decode(transfer, &msg)) {
+            for (uint8_t i = 0; i < msg.commands.len; i++) {
+                if (msg.commands.data[i].actuator_id != FC_LINK_ESTATE_ACTUATOR_ID) {
+                    continue;
+                }
+                const uint8_t ctype = msg.commands.data[i].command_type;
+                const float   cval  = msg.commands.data[i].command_value;
+                g_fc_link_estate_cmd_type  = ctype;
+                g_fc_link_estate_cmd_value = cval;
+
+                engine_state_t req;
+                if (ctype == UAVCAN_EQUIPMENT_ACTUATOR_COMMAND_COMMAND_TYPE_PWM) {
+                    if      (cval < FC_LINK_ESTATE_PWM_CRANK_LO) req = ENGINE_OFF;
+                    else if (cval < FC_LINK_ESTATE_PWM_RUN_LO)   req = ENGINE_CRANK;
+                    else                                          req = ENGINE_RUN;
+                } else {
+                    /* Treat UNITLESS (0) and any normalized form the same way. */
+                    if      (cval < FC_LINK_ESTATE_UNITLESS_CRANK_LO) req = ENGINE_OFF;
+                    else if (cval < FC_LINK_ESTATE_UNITLESS_RUN_LO)   req = ENGINE_CRANK;
+                    else                                               req = ENGINE_RUN;
+                }
+                pt_request_engine_state(req);
+                break;
             }
         }
     }
@@ -301,141 +373,58 @@ static void on_transfer_received(CanardInstance    *ins,
 
 /* ---- TX side ---- */
 
-static void publish_pt_concise(void) {
-    powertrain_state_t pt;
-    osMutexAcquire(g_pt_mtx, osWaitForever);
-    pt = g_pt;
-    osMutexRelease(g_pt_mtx);
+/* FlexDebug payload: uint16 id LE + uint8[<=5] (TAO, single-frame). */
+typedef struct {
+    uint16_t    flex_id;
+    float       value;
+} flex_field_t;
 
-    struct dsdl_lat_powertrain_PTConcise msg;
-    msg.egu_ok           = !(pt.fault_bits & (FAULT_RECT_OFFLINE | FAULT_BUS2_BUSOFF));
-    msg.batt_ok          = (pt.bms_soc_pct > 1000);                   /* TODO placeholder */
-    msg.v_bus            = pt.rect_state.V_dc_cV   / 100.0f;
-    msg.i_load           = 0.0f;                                      /* TODO ADS1262 */
-    msg.i_bat            = 0.0f;                                      /* TODO BMS */
-    msg.i_rect           = pt.rect_state.I_dc_cA   / 100.0f;
-    msg.batt_soc         = pt.bms_soc_pct          / 100.0f;
-    msg.fuel_consumption = 0.0f;                                      /* TODO ECU */
-
-    uint8_t buf[DSDL_LAT_POWERTRAIN_PTCONCISE_MAX_SIZE];
-    uint32_t len = dsdl_lat_powertrain_PTConcise_encode(&msg, buf);
+static void publish_flex_debug(uint16_t flex_id, const uint8_t *u8, uint8_t u8_len) {
+    if (u8_len > FLEXDEBUG_MAX_FRAME_PAYLOAD - 2u) {
+        u8_len = (uint8_t)(FLEXDEBUG_MAX_FRAME_PAYLOAD - 2u);
+    }
+    uint8_t buf[FLEXDEBUG_MAX_FRAME_PAYLOAD];
+    buf[0] = (uint8_t)(flex_id & 0xFFu);
+    buf[1] = (uint8_t)((flex_id >> 8) & 0xFFu);
+    memcpy(&buf[2], u8, u8_len);
 
     canardBroadcast(&s_canard,
-                    DSDL_LAT_POWERTRAIN_PTCONCISE_SIGNATURE,
-                    DSDL_LAT_POWERTRAIN_PTCONCISE_ID,
-                    &s_tid_pt,
-                    CANARD_TRANSFER_PRIORITY_MEDIUM,
-                    buf, (uint16_t)len);
+                    FLEXDEBUG_SIGNATURE,
+                    FLEXDEBUG_ID,
+                    &s_tid_flex,
+                    CANARD_TRANSFER_PRIORITY_LOW,
+                    buf, (uint16_t)(2u + u8_len));
 }
 
-/* uavcan.equipment.power.BatteryInfo: stock MP/QGC battery widget. */
-static void publish_battery_info(void) {
+static void publish_flex_debug_float(uint16_t flex_id, float value) {
+    uint8_t bytes[4];
+    memcpy(bytes, &value, 4);   /* host LE -> wire LE */
+    publish_flex_debug(flex_id, bytes, 4u);
+}
+
+static void publish_flex_debug_batch(void) {
     powertrain_state_t pt;
     osMutexAcquire(g_pt_mtx, osWaitForever);
     pt = g_pt;
     osMutexRelease(g_pt_mtx);
 
-    struct uavcan_equipment_power_BatteryInfo msg;
-    memset(&msg, 0, sizeof(msg));
-
-    msg.voltage             = pt.rect_state.V_dc_cV / 100.0f;
-    msg.current             = 0.0f;                     /* TODO BMS */
-    msg.temperature         = 0.0f;
-    msg.state_of_charge_pct = (uint8_t)(pt.bms_soc_pct / 100u);
-    msg.state_of_health_pct = 100;
-    msg.battery_id          = 0;
-    msg.model_instance_id   = 0;
-    msg.status_flags        = UAVCAN_EQUIPMENT_POWER_BATTERYINFO_STATUS_FLAG_IN_USE;
-
-    uint8_t buf[UAVCAN_EQUIPMENT_POWER_BATTERYINFO_MAX_SIZE];
-    uint32_t len = uavcan_equipment_power_BatteryInfo_encode(&msg, buf);
-
-    g_pub_batt_calls++;
-    g_pub_batt_last_rc = canardBroadcast(&s_canard,
-                    UAVCAN_EQUIPMENT_POWER_BATTERYINFO_SIGNATURE,
-                    UAVCAN_EQUIPMENT_POWER_BATTERYINFO_ID,
-                    &s_tid_batt,
-                    CANARD_TRANSFER_PRIORITY_MEDIUM,
-                    buf, (uint16_t)len);
-}
-
-/* uavcan.equipment.ice.reciprocating.Status -> AP -> MAVLink EFI_STATUS. */
-static void publish_ice_status(void) {
-    powertrain_state_t pt;
-    osMutexAcquire(g_pt_mtx, osWaitForever);
-    pt = g_pt;
-    osMutexRelease(g_pt_mtx);
-
-    struct uavcan_equipment_ice_reciprocating_Status msg;
-    memset(&msg, 0, sizeof(msg));
-
-    /* DEBUG/MOCK ECU feed; replace with pt.ecu_* once ECU task is online. */
-    uint16_t load = pt.fc_throttle_dem_pct / 100u;
-    if (load > 100u) load = 100u;
-
-    uint32_t up_s     = (osKernelGetTickCount() - s_boot_tick) / 1000u;
-    uint32_t mock_rpm = 1000u + ((uint32_t)load * 50u) + (up_s % 60u) * 10u;
-    float    mock_cht_C = 60.0f + ((float)load * 0.5f) + (float)(up_s % 30u);
-
-    /* Always RUNNING; AP EFI driver suppresses updates if STOPPED. */
-    msg.state = UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_STATE_RUNNING;
-    msg.flags = UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_FLAG_TEMPERATURE_SUPPORTED;
-
-    msg.engine_load_percent = (uint8_t)load;
-    msg.engine_speed_rpm    = mock_rpm;
-    msg.coolant_temperature = mock_cht_C + 273.15f; /* K */
-
-    /* Unmeasured -> NaN. */
-    msg.intake_manifold_temperature  = NAN;
-    msg.atmospheric_pressure_kpa     = NAN;
-    msg.intake_manifold_pressure_kpa = NAN;
-    msg.spark_dwell_time_ms          = NAN;
-
-    uint8_t  buf[UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_MAX_SIZE];
-    uint32_t len = uavcan_equipment_ice_reciprocating_Status_encode(&msg, buf);
-
-    g_pub_ice_calls++;
-    g_pub_ice_encoded_bytes = len;
-    g_pub_ice_last_rc = canardBroadcast(&s_canard,
-                    UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_SIGNATURE,
-                    UAVCAN_EQUIPMENT_ICE_RECIPROCATING_STATUS_ID,
-                    &s_tid_ice,
-                    CANARD_TRANSFER_PRIORITY_MEDIUM,
-                    buf, (uint16_t)len);
-}
-
-/* uavcan.equipment.ice.FuelTankStatus -> AP fuel telemetry. */
-static void publish_fuel_tank_status(void) {
-    powertrain_state_t pt;
-    osMutexAcquire(g_pt_mtx, osWaitForever);
-    pt = g_pt;
-    osMutexRelease(g_pt_mtx);
-
-    struct uavcan_equipment_ice_FuelTankStatus msg;
-    memset(&msg, 0, sizeof(msg));
-
-    /* DEBUG/MOCK: replace with ECU feed when online. */
-    uint16_t load = pt.fc_throttle_dem_pct / 100u;
-    if (load > 100u) load = 100u;
-    uint32_t up_min = ((osKernelGetTickCount() - s_boot_tick) / 1000u) / 60u;
-    uint32_t pct    = (up_min < 100u) ? (100u - up_min) : 0u;
-    msg.available_fuel_volume_percent = (uint8_t)pct;
-    msg.available_fuel_volume_cm3     = (float)pct * 100.0f;
-    msg.fuel_consumption_rate_cm3pm   = 50.0f + (float)load * 4.5f;
-
-    msg.fuel_temperature = NAN;
-    msg.fuel_tank_id     = 0;
-
-    uint8_t  buf[UAVCAN_EQUIPMENT_ICE_FUELTANKSTATUS_MAX_SIZE];
-    uint32_t len = uavcan_equipment_ice_FuelTankStatus_encode(&msg, buf);
-
-    g_pub_fuel_calls++;
-    g_pub_fuel_last_rc = canardBroadcast(&s_canard,
-                    UAVCAN_EQUIPMENT_ICE_FUELTANKSTATUS_SIGNATURE,
-                    UAVCAN_EQUIPMENT_ICE_FUELTANKSTATUS_ID,
-                    &s_tid_fuel,
-                    CANARD_TRANSFER_PRIORITY_MEDIUM,
-                    buf, (uint16_t)len);
+    const flex_field_t batch[] = {
+        { FLEX_ID_DUT, pt.ctl_duty_x10000          / 100.0f },
+        { FLEX_ID_THR, pt.engine_throttle_pct_x100 / 100.0f },
+        { FLEX_ID_IRS, pt.I_rect_cmd_cA            / 100.0f },
+        { FLEX_ID_IRM, pt.rect_state.I_dc_cA       / 100.0f },
+        { FLEX_ID_VDC, pt.rect_state.V_dc_cV       / 100.0f },
+        { FLEX_ID_IBF, pt.ctl_i_bat_filt_cA        / 100.0f },
+        { FLEX_ID_IBR, pt.ctl_i_bat_ref_eff_cA     / 100.0f },
+        { FLEX_ID_RPM, (float)pt.rect_state.gen_rpm        },
+        { FLEX_ID_IGT, (float)pt.rect_state.igbt_temp_C    },
+        { FLEX_ID_PRC, (float)pt.ctl_p_rect_W              },
+        { FLEX_ID_EST, (float)pt.engine_state              },
+        { FLEX_ID_FLT, (float)pt.fault_bits                },
+    };
+    for (size_t i = 0; i < sizeof(batch)/sizeof(batch[0]); i++) {
+        publish_flex_debug_float(batch[i].flex_id, batch[i].value);
+    }
 }
 
 static void publish_node_status(uint32_t uptime_sec) {
@@ -444,8 +433,7 @@ static void publish_node_status(uint32_t uptime_sec) {
     msg.health                      = UAVCAN_PROTOCOL_NODESTATUS_HEALTH_OK;
     msg.mode                        = UAVCAN_PROTOCOL_NODESTATUS_MODE_OPERATIONAL;
     msg.sub_mode                    = 0;
-    /* DEBUG: surface RawCommand RX count; restore to pt_get_faults() later. */
-    msg.vendor_specific_status_code = (uint16_t)g_fc_link_rx_rawcommand;
+    msg.vendor_specific_status_code = pt_get_faults();
 
     uint8_t buf[UAVCAN_PROTOCOL_NODESTATUS_MAX_SIZE];
     uint32_t len = uavcan_protocol_NodeStatus_encode(&msg, buf);
@@ -479,10 +467,7 @@ static void drain_canard_tx(void) {
 
 static void fc_link_task(void *arg) {
     (void)arg;
-    uint32_t last_pt_tx     = s_boot_tick;
-    uint32_t last_batt_tx   = s_boot_tick;
-    uint32_t last_ice_tx    = s_boot_tick;
-    uint32_t last_fuel_tx   = s_boot_tick;
+    uint32_t last_flex_tx   = s_boot_tick;
     uint32_t last_status_tx = s_boot_tick;
     uint32_t next           = s_boot_tick;
 
@@ -502,23 +487,9 @@ static void fc_link_task(void *arg) {
             (void)canardHandleRxFrame(&s_canard, &cf, (uint64_t)now * 1000ULL);
         }
 
-        /* DEBUG: high-rate pubs gated; re-enable after GetSet verified. */
-        (void)last_pt_tx; (void)last_batt_tx; (void)last_ice_tx; (void)last_fuel_tx;
-        if (0 && now - last_pt_tx >= FC_LINK_PT_PERIOD_MS) {
-            publish_pt_concise();
-            last_pt_tx = now;
-        }
-        if (0 && now - last_batt_tx >= FC_LINK_BATT_PERIOD_MS) {
-            publish_battery_info();
-            last_batt_tx = now;
-        }
-        if (0 && now - last_ice_tx >= FC_LINK_ICE_PERIOD_MS) {
-            publish_ice_status();
-            last_ice_tx = now;
-        }
-        if (0 && now - last_fuel_tx >= FC_LINK_FUEL_PERIOD_MS) {
-            publish_fuel_tank_status();
-            last_fuel_tx = now;
+        if (now - last_flex_tx >= FC_LINK_FLEX_PERIOD_MS) {
+            publish_flex_debug_batch();
+            last_flex_tx = now;
         }
         if (now - last_status_tx >= FC_LINK_HEARTBEAT_MS) {
             publish_node_status((now - s_boot_tick) / 1000u);

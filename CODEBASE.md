@@ -65,7 +65,7 @@ User code in `USER CODE` blocks; rest is CubeMX boilerplate.
   `RTOS_THREADS` block creates all 9 application tasks. Empty
   `defaultTask` is also created here.
 - **`StartDefaultTask()`** — bench stub: writes `pt_set_bms_inputs(7000)`
-  once, then loops calling `pt_set_fc_inputs(VESC_MODE_CRUISE, 5000)`
+  once, then loops calling `pt_set_fc_inputs(MODE_CRUISE, 5000)`
   every 1 ms. **Will conflict with `fc_link_task` writes once an FC is
   attached** — disable then.
 - **`vApplicationIdleHook()`** — toggles LED on PB2 every 500 ms via
@@ -83,9 +83,11 @@ User code in `USER CODE` blocks; rest is CubeMX boilerplate.
 
 - **`MX_CAN1_Init()`** — CAN1 at **1 Mbps** (prescaler=2, BS1=8, BS2=1,
   SJW=1 with 20 MHz APB1). `AutoRetransmission = ENABLE`,
-  `AutoBusOff = ENABLE`. PA11/PA12 alt-function.
-- **`MX_CAN2_Init()`** — CAN2 at **250 kbps** (prescaler=8). Same flags.
-  PB12/PB13 alt-function.
+  `AutoBusOff = ENABLE`, `TransmitFifoPriority = ENABLE` (required for
+  correct multi-frame TX ordering). PB8/PB9 alt-function AF9.
+- **`MX_CAN2_Init()`** — CAN2 at **250 kbps** (prescaler=8). Same flags
+  except `TransmitFifoPriority = DISABLE` (single-frame VESC traffic only).
+  PB12/PB13 alt-function AF9.
 - **`HAL_CAN_MspInit/MspDeInit`** — RCC clock + GPIO + NVIC enables.
 - Externs: `hcan1`, `hcan2`.
 
@@ -365,7 +367,7 @@ the kernel starts.
 The shared state struct + mutex. Exposes typed helpers so callers don't
 manually take the mutex.
 
-- **`pt_init()`** — zeros `g_pt`, sets `mode = VESC_MODE_IDLE`, creates
+- **`pt_init()`** — zeros `g_pt`, sets `mode = MODE_IDLE`, creates
   the static priority-inheriting mutex.
 - **`pt_set_setpoint(I_cmd, mode)`** — supervisor's exclusive write
   point for the rectifier setpoint.
@@ -409,7 +411,7 @@ setpoint.
   1. Snapshot `fc_flight_state`, `fc_throttle_dem_pct`, `bms_soc_pct`,
      `fault_bits` under mutex.
   2. If `RECT_OFFLINE | BUS2_BUSOFF` set → override mode to
-     `VESC_MODE_FAULT`.
+     `MODE_FAULT`.
   3. `control_law_step` → new `I_rect_cmd_cA`.
   4. `pt_set_setpoint(I_cmd, final_mode)`.
   5. `pt_set_contactor_cmds(true, true)` (V1 always-closed; fault-driven
@@ -559,7 +561,7 @@ Broadcast PCU → FC at 20 Hz. DTID 20100. Fields: `egu_ok`, `batt_ok`,
 ### `dsdl/lat/powertrain/20101.ThrottleDemand.uavcan`
 
 Broadcast FC → PCU at 50 Hz. DTID 20101. `flight_phase` 4-bit enum
-(matches `vesc_mode_t`), `throttle_pct` float16.
+(matches `flight_mode_t`), `throttle_pct` float16.
 
 ### `Middlewares/Third_Party/libcanard/`
 

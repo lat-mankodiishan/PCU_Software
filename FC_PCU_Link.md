@@ -4,8 +4,10 @@ DroneCAN (UAVCAN v0) link between the Cube Orange+ flight controller and the
 PCU board. All implemented with **stock ArduPilot firmware on the Pixhawk
 side** — no autopilot firmware modifications required.
 
-Status: **functional baseline as of 2026-05-06**. Throttle pipeline and
-GCS-settable flight state both verified end-to-end.
+Status: **functional baseline as of 2026-05-25**. Throttle pipeline,
+GCS-settable `flight_state`, and GCS-settable `engine_state` verified
+end-to-end. Custom DSDLs (PTConcise / ThrottleDemand) removed in favour
+of stock messages.
 
 ---
 
@@ -46,15 +48,19 @@ side, never as a downlink dependency.
 ```
 
 **Wiring:**
-- PCU CAN1 uses `PA11` (CAN1_RX) / `PA12` (CAN1_TX), AF9.
+- PCU CAN1 uses `PB8` (CAN1_RX) / `PB9` (CAN1_TX), AF9.
 - Pixhawk CAN1 4-pin JST-GH: pin 2 = CAN_H, pin 3 = CAN_L, pin 4 = GND.
 - Pixhawk has built-in 120 Ω termination on CAN1.
 - PCU end terminated externally if the cable is non-trivially long.
 - Common GND between boards is mandatory — diff-pair alone is not enough.
 
-**Bitrate / sample point on PCU (`Core/Src/can.c`):**
+**Bitrate / sample point on PCU (`Core/Src/can.c`, verified 2026-05-27):**
 - `Prescaler = 2`, `BS1 = 8 TQ`, `BS2 = 1 TQ`, `SyncJumpWidth = 1 TQ`
 - APB1 = 20 MHz → 1.0 Mbps, sample point 90 %.
+- `TransmitFifoPriority = ENABLE` — required for correct multi-frame TX
+  ordering (libcanard pushes frames sharing one CAN ID; with DISABLE the
+  hardware can reorder them and the receiver sees toggle-bit mismatches).
+- `AutoRetransmission = ENABLE`, `AutoBusOff = ENABLE`.
 - Clock source is HSI (±1 % at 25 °C), which is on the edge of the CAN
   timing budget. Crystal HSE would be preferable for production.
 
@@ -92,42 +98,69 @@ side, never as a downlink dependency.
   4. Call `pt_set_fc_inputs(mode, throttle_pct)` which under `g_pt_mtx`
      writes `g_pt.fc_throttle_dem_pct` and `g_pt.fc_flight_state`.
 
-### 3.2 GCS → PCU: Flight state (`uavcan.protocol.param.GetSet` service)
+### 3.2 GCS / FC → PCU: Param service (`uavcan.protocol.param.GetSet`)
 
 PCU exposes a configurable parameter table via the standard DroneCAN
 parameter service. Mission Planner and the DroneCAN GUI Tool can fetch
 and set parameters by right-clicking node 50 → "Configure parameters".
+ArduPilot Lua scripts can also write these via `DroneCAN_Handle` (used
+for RC → engine_state binding — see §3.4).
 
-| index | name | type | range | default |
+| index | name           | type | range | default |
 |---|---|---|---|---|
-| 0 | `flight_state` | int | 0..5 | 0 |
+| 0 | `flight_state` | int  | 0..5  | 0       |
+| 1 | `engine_state` | int  | 0..5  | 0       |
 
-The integer values map 1:1 to `vesc_mode_t`:
+`flight_state` integer values map 1:1 to `flight_mode_t`:
 
 | value | mode |
 |---|---|
-| 0 | `VESC_MODE_IDLE` |
-| 1 | `VESC_MODE_TAKEOFF` |
-| 2 | `VESC_MODE_CLIMB` |
-| 3 | `VESC_MODE_CRUISE` |
-| 4 | `VESC_MODE_LAND` |
-| 5 | `VESC_MODE_FAULT` |
+| 0 | `MODE_IDLE` |
+| 1 | `MODE_TAKEOFF` |
+| 2 | `MODE_CLIMB` |
+| 3 | `MODE_CRUISE` |
+| 4 | `MODE_LAND` |
+| 5 | `MODE_FAULT` |
+
+`engine_state` integer values map 1:1 to `engine_state_t`:
+
+| value | mode |
+|---|---|
+| 0 | `ENGINE_OFF` |
+| 1 | `ENGINE_CRANK` |
+| 2 | `ENGINE_WARMUP` |
+| 3 | `ENGINE_RUN` |
+| 4 | `ENGINE_COOLDOWN` |
+| 5 | `ENGINE_FAULT` |
 
 Implementation:
 - `should_accept` admits service request `data_type_id == 11` with the
   GetSet signature.
 - `handle_param_get_set` (in `fc_link_task.c`) decodes the request,
-  matches by name (`"flight_state"`) or by `index == 0`, applies any SET,
-  and emits a `GetSetResponse` carrying the post-set value + canonical
-  name. Default / min / max are returned as EMPTY tags to keep the
-  multi-frame transfer short — this matters because the GCS-side timeout
-  can fire before a long response (8+ frames) clears the bus when
-  autopilot is also publishing RawCommand at high rate.
+  matches by name (`"flight_state"` / `"engine_state"`) or by index
+  (`0` / `1`), applies any SET, and emits a `GetSetResponse` carrying
+  the post-set value + canonical name. Default / min / max are returned
+  as EMPTY tags to keep the multi-frame transfer short — this matters
+  because the GCS-side timeout can fire before a long response (8+
+  frames) clears the bus when autopilot is also publishing RawCommand
+  at high rate.
 - Response priority is HIGH so it wins arbitration against autopilot's
   RawCommand.
-- The new value lands in `volatile int8_t g_pcu_param_flight_state`. The
-  next RawCommand reception reads it and feeds it into
+- A SET on `flight_state` lands in `volatile int8_t g_pcu_param_flight_state`;
+  the next RawCommand reception reads it and feeds it into
   `pt_set_fc_inputs(mode, throttle)`.
+- A SET on `engine_state` is applied immediately via `pt_set_engine_state()`,
+  which takes `g_pt_mtx` and updates `g_pt.engine_state` +
+  `g_pt.engine_state_tick`. The supervisor task's 10 ms loop reads
+  `g_pt.engine_state` and dispatches CRANK / WARMUP / RUN / COOLDOWN /
+  OFF behaviour. Note: the GPIO PA7 BLEED→LOCK→RUN swap sequence in
+  `supervisor_task` is *only* triggered by the bench switch's rising
+  edge; direct CRANK→RUN via param SET skips BLEED. This is fine for
+  bench bring-up but will need reconciliation before airborne RC use.
+
+On copter, `flight_state` is still settable but downstream code does
+not consume it (single controller regardless of phase). Flight-phase
+SOC management strategies land on fixed-wing.
 
 ### 3.3 PCU → Pixhawk / GCS
 
@@ -136,15 +169,57 @@ Implementation:
 | `uavcan.protocol.NodeStatus` | 341 | 1 Hz | ✅ enabled |
 | `uavcan.protocol.GetNodeInfo` (response) | 1 | on request | ✅ enabled |
 | `uavcan.protocol.param.GetSet` (response) | 11 | on request | ✅ enabled |
-| `uavcan.equipment.power.BatteryInfo` | 1092 | 10 Hz | ⏸ disabled (gated `if (0 && ...)`) |
-| `uavcan.equipment.ice.reciprocating.Status` | 1120 | 10 Hz | ⏸ disabled — see §6.5 |
-| `uavcan.equipment.ice.FuelTankStatus` | 1129 | 1 Hz | ⏸ disabled |
-| `dsdl.lat.powertrain.PTConcise` (custom) | 20100 | 20 Hz | ⏸ disabled — custom DSDL, GCS can't decode without a copy |
+| `uavcan.protocol.debug.KeyValue` | 16370 | 5 Hz × 12 keys | ✅ enabled (sole telemetry channel) |
 
-The high-rate publishers were silenced after observing that concurrent
-multi-frame transfers from PCU + autopilot's heavy RawCommand traffic
-caused libcanard pool exhaustion which made GetSet responses time out at
-the GCS. They can be re-enabled selectively once headroom is confirmed.
+### Telemetry architecture decision (2026-05-26)
+
+All powertrain telemetry to the GCS goes through `uavcan.protocol.debug.KeyValue`.
+The stock-message publishers (`BatteryInfo`, `ice.reciprocating.Status`,
+`FuelTankStatus`, custom `PTConcise`) have been **deleted entirely** rather
+than kept gated.
+
+Rationale:
+- Battery V/I/SOC for failsafes comes from the **Hobbywing ESC telem on CAN2**,
+  forwarded by ArduPilot directly to MAVLink `ESC_TELEMETRY_*` and onward to MP.
+  No PCU-side battery publish is needed.
+- ICE Status / FuelTankStatus would have required real ECU + fuel-sensor data
+  to be useful; we don't have either yet, and §6.5 multi-frame CRC issues bit
+  whenever they ran at any meaningful rate.
+- KeyValue is self-describing (key string + float value), single-frame
+  per broadcast when keys are ≤3 chars, and ArduPilot forwards each as
+  MAVLink `NAMED_VALUE_FLOAT` → renderable in MP Quick tab and logged in
+  the FC dataflash as `NVF` entries.
+
+### KeyValue field list (PCU → GCS)
+
+Each tick (200 ms) publishes the full set; all keys are 3 chars to keep
+each broadcast single-frame.
+
+| Key | Source field in `g_pt` | Unit |
+|---|---|---|
+| `DUT` | `ctl_duty_x10000` | % |
+| `THR` | `engine_throttle_pct_x100` | % |
+| `IRS` | `I_rect_cmd_cA` | A (setpoint) |
+| `IRM` | `rect_state.I_dc_cA` | A (measured) |
+| `VDC` | `rect_state.V_dc_cV` | V |
+| `IBF` | `ctl_i_bat_filt_cA` | A (filtered) |
+| `IBR` | `ctl_i_bat_ref_eff_cA` | A (reference) |
+| `RPM` | `rect_state.gen_rpm` | — |
+| `IGT` | `rect_state.igbt_temp_C` | °C |
+| `PRC` | `ctl_p_rect_W` | W |
+| `EST` | `engine_state` | enum 0..5 |
+| `FLT` | `fault_bits` | bitfield as int |
+
+To add a field: edit the `batch[]` array in `publish_debug_kv_batch()`
+in `fc_link_task.c`. Keep the new key ≤3 chars. Update this table.
+
+### Deleted publishers (do not resurrect)
+
+- `dsdl.lat.powertrain.PTConcise` (custom DTID 20100) — replaced by KeyValue. Deleted 2026-05-25.
+- `dsdl.lat.powertrain.ThrottleDemand` (custom DTID 20101) — replaced by stock `esc.RawCommand`. Deleted 2026-05-25.
+- `uavcan.equipment.power.BatteryInfo` (DTID 1092) — battery data sourced from ESC telem on CAN2. Deleted 2026-05-26.
+- `uavcan.equipment.ice.reciprocating.Status` (DTID 1120) — engine RPM / temps go via KeyValue. Deleted 2026-05-26.
+- `uavcan.equipment.ice.FuelTankStatus` (DTID 1129) — no fuel sensor yet; when added, publish as KeyValue. Deleted 2026-05-26.
 
 ---
 
@@ -217,7 +292,7 @@ PCU CAN1 receive
   └─ libcanard reassembles transfer
   └─ fc_link_task::handle_param_get_set
         match by name "flight_state" or index 0
-        if SET (value tag = INTEGER): clamp 0..VESC_MODE_FAULT,
+        if SET (value tag = INTEGER): clamp 0..MODE_FAULT,
                                        g_pcu_param_flight_state = v
         build response (value + name only, default/min/max EMPTY)
         canardRequestOrRespond(... CanardResponse, HIGH priority)
@@ -294,8 +369,10 @@ queue (16) couldn't sustain multiple concurrent multi-frame transfers.
 - Made GetSet response carry only `value + name` (default/min/max EMPTY)
   to fit in fewer frames.
 - Bumped GetSet response priority from MEDIUM to HIGH.
-- Silenced PTConcise / BatteryInfo / ICE Status / FuelTankStatus while
-  validating the GetSet path; re-enable selectively now.
+- All multi-frame publishers eventually deleted (2026-05-25, 2026-05-26)
+  in favour of single-frame KeyValue. The multi-frame fragility
+  diagnosis remains valid for any future multi-frame transfer added
+  back — see §3.3.
 **Not yet fixed:** ICE Status full multi-frame round-trip — set aside.
 The CRC mismatch on assembly across long transfers under bus pressure
 needs further investigation (possibly a TAO setting mismatch or pool
@@ -347,7 +424,7 @@ for flight state.
 Add these to the Live Expressions panel during a debug session:
 
 ```
-g_pcu_param_flight_state                    # 0..5 = vesc_mode_t
+g_pcu_param_flight_state                    # 0..5 = flight_mode_t
 g_pt.fc_throttle_dem_pct                    # 0..10000 (0.01 %)
 g_pt.fc_flight_state                        # current mode
 g_pt.I_rect_cmd_cA                          # rectifier-side current setpoint
@@ -371,8 +448,14 @@ g_can1_tx_post_no
 
 ## 8. Cleanup TODO before production / merge
 
+- [x] ~~Delete custom DSDLs `PTConcise` (20100) and `ThrottleDemand`
+      (20101) + generated codec files + dead code paths.~~ Done
+      2026-05-25.
+- [x] ~~Delete stock publishers `BatteryInfo` / `ice.reciprocating.Status`
+      / `FuelTankStatus` and consolidate all telemetry through KeyValue.~~
+      Done 2026-05-26 — see §3.3 "Telemetry architecture decision".
 - [ ] Remove all debug counters in `fc_link_task.c`:
-      `g_fc_link_rx_*`, `g_pub_*`, `g_pcu_should_accept_param`,
+      `g_fc_link_rx_*`, `g_pcu_should_accept_param`,
       `g_pcu_param_handler_calls`, `g_pcu_param_set_count`,
       `g_pcu_param_resp_rc`.
 - [ ] Remove `g_can1_*` ESR snapshot variables and `can_hw_diag_snapshot()`
@@ -380,8 +463,9 @@ g_can1_tx_post_no
 - [ ] Restore NodeStatus's `vendor_specific_status_code = pt_get_faults()`
       (currently hijacked to surface `g_fc_link_rx_rawcommand` for
       SWD-free observation).
-- [ ] Remove the `if (0 && ...)` guards on PTConcise / BatteryInfo / ICE
-      Status / FuelTankStatus publishers, or delete them if not needed.
+- [ ] Populate the KeyValue values from real `g_pt.bms_*` / `g_pt.ecu_*`
+      fields once BMS and ECU tasks are online (today the rect/ctl
+      fields are real but bms/ecu paths land back at zero).
 - [ ] Restore Pixhawk-side `BRD_SAFETYENABLE = 1`, `ARMING_CHECK = 1`,
       `DISARM_DELAY = 10` (or whatever your flight-config defaults are)
       before any flight.
@@ -389,9 +473,16 @@ g_can1_tx_post_no
       mismatch if EFI telemetry is required. Likely candidates: TAO flag
       mismatch between encoder and Python receiver, pool fragmentation
       under bus pressure, or libcanard version-specific bit-packing bug.
+- [ ] Reconcile the GPIO PA7 BLEED→LOCK→RUN swap sequence with
+      param-SET driven `engine_state` transitions. Today the swap only
+      fires on the bench switch's rising edge; an airborne RC switch
+      writing `engine_state=ENGINE_RUN` via param SET skips BLEED.
+      Either run BLEED on *any* CRANK→RUN transition, or make the RC
+      script write CRANK first + trigger swap separately.
 - [ ] Optional: implement `uavcan.protocol.param.ExecuteOpcode SAVE` to
-      persist `flight_state` across PCU power-cycles (writes to one
-      backup FLASH sector or to the RTC backup registers).
+      persist `flight_state` / `engine_state` across PCU power-cycles
+      (writes to one backup FLASH sector or to the RTC backup
+      registers). Without this, both params reset to 0 on every boot.
 
 ---
 

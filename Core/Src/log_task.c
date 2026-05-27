@@ -61,15 +61,13 @@ static void log_task(void *arg) {
            "mode,ctrl_mode,I_cmd_cA,omega_cmd,duty_cmd,"
            "V_dc_cV,I_dc_cA,gen_rpm,igbt_C,rect_fault,rect_seq,rect_tick,"
            "fc_state,fc_thr_pct,fc_tick,"
-           "bms_soc,bms_v_cV,bms_i_cA,bms_C,bms_tick,"
-           "ecu_rpm,ecu_fuel_dg_s,ecu_cht_C,ecu_tick,"
+           "ecu_rpm,ecu_estat,ecu_tick,"
+           "eng_state,eng_state_tick,"
+           "ctl_i_bat_filt,ctl_i_bat_ref,ctl_i_rect_dem,ctl_p_rect_W,ctl_duty,ctl_theta,"
            "sup_hb,ct_bat,ct_rect,"
            "faults,"
            "expt_active,expt_phase,expt_label,"
-           "tc1_cdeg,tc2_cdeg,tc3_cdeg,adc0,adc1,adc2,adc3,"
-           "dyno_I_mA,dyno_V_mV,dyno_P_dW,dyno_E_Wh,dyno_tick,"
-           "ld_I_mA,ld_V_mV,ld_P_dW,ld_E_Wh,ld_tick,"
-           "thr_en,thr_duty,thr_err_mA,thr_src_filt_mA,thr_tick\n", &s_file);
+           "tc1_cdeg,tc2_cdeg,tc3_cdeg,adc0,adc1,adc2,adc3\n", &s_file);
     f_sync(&s_file);
 
     uint32_t next = osKernelGetTickCount();
@@ -90,15 +88,13 @@ static void log_task(void *arg) {
             "%u,%u,%d,%ld,%d,"
             "%u,%d,%u,%d,%u,%u,%lu,"
             "%u,%u,%lu,"
-            "%u,%u,%d,%d,%lu,"
-            "%u,%u,%d,%lu,"
+            "%u,%u,%lu,"
+            "%u,%lu,"
+            "%d,%d,%d,%lu,%u,%u,"
             "%lu,%u,%u,"
             "0x%04X,"
             "%u,%u,%s,"
-            "%ld,%ld,%ld,%ld,%ld,%ld,%ld,"
-            "%ld,%ld,%lu,%lu,%lu,"
-            "%ld,%ld,%lu,%lu,%lu,"
-            "%u,%u,%ld,%ld,%lu\n",
+            "%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
             (unsigned long)osKernelGetTickCount(),
             (unsigned)pt.mode, (unsigned)pt.rect_ctrl_mode,
             pt.I_rect_cmd_cA, (long)pt.omega_e_cmd_erpm, pt.duty_cmd_x10000,
@@ -108,10 +104,15 @@ static void log_task(void *arg) {
             (unsigned long)pt.rect_state_tick,
             (unsigned)pt.fc_flight_state, pt.fc_throttle_dem_pct,
             (unsigned long)pt.fc_input_tick,
-            pt.bms_soc_pct, pt.bms_v_bat_cV, pt.bms_i_bat_cA,
-            pt.bms_max_cell_C, (unsigned long)pt.bms_input_tick,
-            pt.ecu_rpm, pt.ecu_fuel_rate_dg_s, pt.ecu_cht_C,
+            pt.ecu_rpm,
+            (unsigned)pt.ecu_engine_status,
             (unsigned long)pt.ecu_input_tick,
+            (unsigned)pt.engine_state,
+            (unsigned long)pt.engine_state_tick,
+            pt.ctl_i_bat_filt_cA, pt.ctl_i_bat_ref_eff_cA,
+            pt.ctl_i_rect_demand_cA,
+            (unsigned long)pt.ctl_p_rect_W,
+            pt.ctl_duty_x10000, pt.ctl_theta_pct_x100,
             (unsigned long)pt.supervisor_heartbeat,
             (unsigned)pt.contactor_battery_cmd,
             (unsigned)pt.contactor_rectifier_cmd,
@@ -123,23 +124,7 @@ static void log_task(void *arg) {
             (long)sd.adc.ch[0].raw,
             (long)sd.adc.ch[1].raw,
             (long)sd.adc.ch[2].raw,
-            (long)sd.adc.ch[3].raw,
-            (long)pt.dyno_current_mA,
-            (long)pt.dyno_vbus_mV,
-            (unsigned long)pt.dyno_power_dW,
-            /* uint64 truncated to u32 (4 GWh ceiling > bench needs). */
-            (unsigned long)pt.dyno_energy_Wh,
-            (unsigned long)pt.dyno_input_tick,
-            (long)pt.dyno_load_current_mA,
-            (long)pt.dyno_load_vbus_mV,
-            (unsigned long)pt.dyno_load_power_dW,
-            (unsigned long)pt.dyno_load_energy_Wh,
-            (unsigned long)pt.dyno_load_input_tick,
-            (unsigned)pt.throttle_ctrl_enabled,
-            (unsigned)pt.throttle_pwm_duty,
-            (long)pt.throttle_current_err_mA,
-            (long)pt.throttle_src_filt_mA,
-            (unsigned long)pt.throttle_ctrl_tick);
+            (long)sd.adc.ch[3].raw);
 
         UINT bw;
         if (n > 0 && f_write(&s_file, s_line, (UINT)n, &bw) == FR_OK) {

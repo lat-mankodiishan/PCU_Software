@@ -1,4 +1,4 @@
-#include "experiment_task.h"
+#include "dyno_sweep_task.h"
 #include "experiment.h"
 #include "experiment_profiles.h"
 #include "cmsis_os2.h"
@@ -11,21 +11,21 @@
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[256];        /* 1 KB */
 
-static void expt_task(void *arg);
+static void dyno_sweep_task(void *arg);
 
-void expt_task_start(void) {
+void dyno_sweep_task_start(void) {
     static const osThreadAttr_t tattr = {
-        .name       = "expt",
+        .name       = "dyno_swp",
         .cb_mem     = &s_tcb,
         .cb_size    = sizeof(s_tcb),
         .stack_mem  = s_stack,
         .stack_size = sizeof(s_stack),
         .priority   = osPriorityNormal,  /* prio 3 */
     };
-    osThreadNew(expt_task, NULL, &tattr);
+    osThreadNew(dyno_sweep_task, NULL, &tattr);
 }
 
-static void expt_task(void *arg) {
+static void dyno_sweep_task(void *arg) {
     (void)arg;
 
     /* Startup grace; let subscribers come up first. */

@@ -53,7 +53,7 @@ static int32_t prev_setpoint(rect_ctrl_mode_t mode) {
     return v;
 }
 
-static void publish(rect_ctrl_mode_t mode, int32_t value, vesc_mode_t pt_mode) {
+static void publish(rect_ctrl_mode_t mode, int32_t value, flight_mode_t pt_mode) {
     switch (mode) {
     case RECT_CTRL_CURRENT: pt_set_setpoint      ((int16_t)value, pt_mode); break;
     case RECT_CTRL_OMEGA:   pt_set_setpoint_omega(value,          pt_mode); break;
@@ -143,7 +143,7 @@ void expt_run(const expt_profile_t *profile) {
         }
     } while (profile->loop && !peek_abort());
 
-    pt_set_setpoint(0, VESC_MODE_IDLE);
+    pt_set_setpoint(0, MODE_IDLE);
     mark_state(false, 0, NULL);
 }
 
