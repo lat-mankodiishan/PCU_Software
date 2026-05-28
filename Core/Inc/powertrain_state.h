@@ -149,6 +149,9 @@ void pt_set_fc_inputs(flight_mode_t flight_state, uint16_t throttle_dem_pct);
 void pt_set_engine_state(engine_state_t s);
 void pt_request_engine_state(engine_state_t s);
 
+/* Pre-power gate: VESC + FC alive, no critical faults. CRANK/RUN rejected if false. */
+bool pt_preflight_ok(void);
+
 /* Sentinel for engine_state_req meaning "no pending request". */
 #define ENGINE_STATE_REQ_NONE ((engine_state_t)0xFF)
 

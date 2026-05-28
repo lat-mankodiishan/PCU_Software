@@ -115,7 +115,29 @@ void pt_set_engine_state(engine_state_t s) {
     osMutexRelease(g_pt_mtx);
 }
 
+/* Diagnostic: how many CRANK/RUN requests were rejected by the pre-flight gate. */
+volatile uint32_t g_pt_preflight_reject = 0u;
+
+#define PT_PREFLIGHT_RECT_STALE_MS   500u
+#define PT_PREFLIGHT_FC_STALE_MS     500u
+#define PT_PREFLIGHT_CRITICAL_FAULTS (FAULT_RECT_OFFLINE | FAULT_BUS1_BUSOFF | FAULT_BUS2_BUSOFF)
+
+bool pt_preflight_ok(void) {
+    uint32_t now = osKernelGetTickCount();
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    bool rect_ok  = g_pt.rect_state_tick && (now - g_pt.rect_state_tick) < PT_PREFLIGHT_RECT_STALE_MS;
+    bool fc_ok    = g_pt.fc_input_tick  && (now - g_pt.fc_input_tick)  < PT_PREFLIGHT_FC_STALE_MS;
+    uint16_t f    = g_pt.fault_bits;
+    osMutexRelease(g_pt_mtx);
+    return rect_ok && fc_ok && ((f & PT_PREFLIGHT_CRITICAL_FAULTS) == 0u);
+}
+
 void pt_request_engine_state(engine_state_t s) {
+    /* Block CRANK/RUN unless pre-flight is clean. OFF/FAULT always allowed. */
+    if ((s == ENGINE_CRANK || s == ENGINE_RUN) && !pt_preflight_ok()) {
+        g_pt_preflight_reject++;
+        return;
+    }
     osMutexAcquire(g_pt_mtx, osWaitForever);
     g_pt.engine_state_req      = s;
     g_pt.engine_state_req_tick = osKernelGetTickCount();

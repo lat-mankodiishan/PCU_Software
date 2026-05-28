@@ -53,6 +53,11 @@
 #define FLEX_ID_EST 11u
 #define FLEX_ID_FLT 12u
 
+/* Set to 1 to publish synthetic test values (each field distinct, step every
+ * 3 s) instead of g_pt snapshots. Strip when peripherals come online. */
+#define FC_LINK_FLEX_TEST_MODE       1
+#define FC_LINK_FLEX_TEST_PERIOD_MS  3000u
+
 #define FC_LINK_RX_QUEUE_DEPTH    64
 #define FC_LINK_MEM_POOL_BYTES  8192
 
@@ -354,7 +359,6 @@ static void on_transfer_received(CanardInstance    *ins,
                     else if (cval < FC_LINK_ESTATE_PWM_RUN_LO)   req = ENGINE_CRANK;
                     else                                          req = ENGINE_RUN;
                 } else {
-                    /* Treat UNITLESS (0) and any normalized form the same way. */
                     if      (cval < FC_LINK_ESTATE_UNITLESS_CRANK_LO) req = ENGINE_OFF;
                     else if (cval < FC_LINK_ESTATE_UNITLESS_RUN_LO)   req = ENGINE_CRANK;
                     else                                               req = ENGINE_RUN;
@@ -427,6 +431,38 @@ static void publish_flex_debug_batch(void) {
     }
 }
 
+#if FC_LINK_FLEX_TEST_MODE
+/* Synthetic downlink for bench-testing telemetry plumbing without peripherals.
+ * Each field has a distinct base + per-step delta; counter advances every 3 s. */
+static void publish_flex_debug_test(void) {
+    static uint32_t last_step_tick = 0;
+    static uint32_t step           = 0;
+    uint32_t now = osKernelGetTickCount();
+    if (last_step_tick == 0u || (now - last_step_tick) >= FC_LINK_FLEX_TEST_PERIOD_MS) {
+        step++;
+        last_step_tick = now;
+    }
+    const float s = (float)step;
+    const flex_field_t batch[] = {
+        { FLEX_ID_DUT, 11.0f  + s         },
+        { FLEX_ID_THR, 22.0f  + s         },
+        { FLEX_ID_IRS, 33.0f  + s         },
+        { FLEX_ID_IRM, 44.0f  + s         },
+        { FLEX_ID_VDC, 55.0f  + s         },
+        { FLEX_ID_IBF, 66.0f  + s         },
+        { FLEX_ID_IBR, 77.0f  + s         },
+        { FLEX_ID_RPM, 1000.0f + 100.0f*s },
+        { FLEX_ID_IGT, 25.0f  + s         },
+        { FLEX_ID_PRC, 250.0f + 10.0f*s   },
+        { FLEX_ID_EST, (float)(step % 4u) },
+        { FLEX_ID_FLT, (float)(step & 0xFFu) },
+    };
+    for (size_t i = 0; i < sizeof(batch)/sizeof(batch[0]); i++) {
+        publish_flex_debug_float(batch[i].flex_id, batch[i].value);
+    }
+}
+#endif
+
 static void publish_node_status(uint32_t uptime_sec) {
     struct uavcan_protocol_NodeStatus msg;
     msg.uptime_sec                  = uptime_sec;
@@ -488,7 +524,11 @@ static void fc_link_task(void *arg) {
         }
 
         if (now - last_flex_tx >= FC_LINK_FLEX_PERIOD_MS) {
+#if FC_LINK_FLEX_TEST_MODE
+            publish_flex_debug_test();
+#else
             publish_flex_debug_batch();
+#endif
             last_flex_tx = now;
         }
         if (now - last_status_tx >= FC_LINK_HEARTBEAT_MS) {

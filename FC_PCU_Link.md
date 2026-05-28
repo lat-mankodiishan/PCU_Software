@@ -87,24 +87,22 @@ side, never as a downlink dependency.
   - Motor Test feature (MP → SETUP → Optional Hardware → Motor Test) sends
     `MAV_CMD_DO_MOTOR_TEST`, drives a motor at a specified throttle for a
     specified duration, no arm needed; works for copter frames.
-- `ArduPilot publishes channel 1 throttle when `CAN_D1_UC_ESC_BM = 1`
-  (bitmask: bit N enables ESC channel N+1).
-- Payload is `int14[<=20] cmd`, indexed by ESC channel. PCU reads
-  `cmd[FC_LINK_ESC_INDEX]` (default index 0 = channel 1).
+- Copter: `CAN_D1_UC_ESC_BM = 0x3F` (bits 0..5, all 6 motor channels).
+  PCU averages `cmd[0..len-1]` because per-motor commands carry attitude
+  trim which cancels out across the rotor array — the average is collective.
+- Payload is `int14[<=20] cmd`, indexed by ESC channel.
 - Reception path in `fc_link_task.c::on_transfer_received`:
-  1. Decode the `int14` → clamp to `[0, FC_LINK_ESC_RAW_MAX = 8191]`.
-  2. Scale to 0..10000 (0.01 % LSB).
-  3. Combine with the GCS-set `flight_state` (next channel).
-  4. Call `pt_set_fc_inputs(mode, throttle_pct)` which under `g_pt_mtx`
-     writes `g_pt.fc_throttle_dem_pct` and `g_pt.fc_flight_state`.
+  1. Clamp each channel to `[0, 8191]`, sum, divide by `msg.cmd.len`.
+  2. Scale int14 0..8191 → 0..10000 (0.01 % LSB).
+  3. Call `pt_set_fc_inputs(mode, throttle_pct)` under `g_pt_mtx`.
 
 ### 3.2 GCS / FC → PCU: Param service (`uavcan.protocol.param.GetSet`)
 
 PCU exposes a configurable parameter table via the standard DroneCAN
 parameter service. Mission Planner and the DroneCAN GUI Tool can fetch
 and set parameters by right-clicking node 50 → "Configure parameters".
-ArduPilot Lua scripts can also write these via `DroneCAN_Handle` (used
-for RC → engine_state binding — see §3.4).
+RC → engine_state uses the actuator channel instead (see §3.4) because
+ArduPilot Lua cannot send DroneCAN service requests directly.
 
 | index | name           | type | range | default |
 |---|---|---|---|---|
@@ -149,14 +147,14 @@ Implementation:
 - A SET on `flight_state` lands in `volatile int8_t g_pcu_param_flight_state`;
   the next RawCommand reception reads it and feeds it into
   `pt_set_fc_inputs(mode, throttle)`.
-- A SET on `engine_state` is applied immediately via `pt_set_engine_state()`,
-  which takes `g_pt_mtx` and updates `g_pt.engine_state` +
-  `g_pt.engine_state_tick`. The supervisor task's 10 ms loop reads
-  `g_pt.engine_state` and dispatches CRANK / WARMUP / RUN / COOLDOWN /
-  OFF behaviour. Note: the GPIO PA7 BLEED→LOCK→RUN swap sequence in
-  `supervisor_task` is *only* triggered by the bench switch's rising
-  edge; direct CRANK→RUN via param SET skips BLEED. This is fine for
-  bench bring-up but will need reconciliation before airborne RC use.
+- A SET on `engine_state` routes through `pt_request_engine_state()` (writes
+  `g_pt.engine_state_req`). Supervisor (5 Hz) reads the request and applies it:
+  OFF/CRANK direct, RUN only from CRANK via the 4-phase swap
+  (BLEED 300 ms → LOCK 1000 ms → PRIME 500 ms at duty=60% / throttle=60% → RUN).
+  Same path regardless of source (param GetSet, Lua actuator channel, GPIO PA7).
+- CRANK/RUN requests are rejected by `pt_preflight_ok()` unless VESC + FC
+  are alive and no critical faults are set. OFF/FAULT always accepted.
+  Reject count exposed via `g_pt_preflight_reject` (Live Watch).
 
 On copter, `flight_state` is still settable but downstream code does
 not consume it (single controller regardless of phase). Flight-phase
@@ -166,60 +164,73 @@ SOC management strategies land on fixed-wing.
 
 | Frame | DTID | Period | Status |
 |---|---|---|---|
-| `uavcan.protocol.NodeStatus` | 341 | 1 Hz | ✅ enabled |
+| `uavcan.protocol.NodeStatus` | 341 | 1 Hz | ✅ enabled — `vendor_specific_status_code = pt_get_faults()` |
 | `uavcan.protocol.GetNodeInfo` (response) | 1 | on request | ✅ enabled |
 | `uavcan.protocol.param.GetSet` (response) | 11 | on request | ✅ enabled |
-| `uavcan.protocol.debug.KeyValue` | 16370 | 5 Hz × 12 keys | ✅ enabled (sole telemetry channel) |
+| `dronecan.protocol.FlexDebug` | 16371 | 5 Hz × 12 IDs | ✅ enabled (telemetry channel) |
 
-### Telemetry architecture decision (2026-05-26)
+### Telemetry architecture (FlexDebug + Lua bridge)
 
-All powertrain telemetry to the GCS goes through `uavcan.protocol.debug.KeyValue`.
-The stock-message publishers (`BatteryInfo`, `ice.reciprocating.Status`,
-`FuelTankStatus`, custom `PTConcise`) have been **deleted entirely** rather
-than kept gated.
+Telemetry goes through `dronecan.protocol.FlexDebug` (one ID per field,
+single-frame `uint16 id + float32 LE`). Stock AP `AP_DroneCAN` caches
+FlexDebug by `(source_node, msg.id)` when `CAN_D1_UC_OPTION` bit 9
+(`ENABLE_FLEX_DEBUG = 512`) is set. **This bit must be on** or the script
+gets nothing.
 
-Rationale:
-- Battery V/I/SOC for failsafes comes from the **Hobbywing ESC telem on CAN2**,
-  forwarded by ArduPilot directly to MAVLink `ESC_TELEMETRY_*` and onward to MP.
-  No PCU-side battery publish is needed.
-- ICE Status / FuelTankStatus would have required real ECU + fuel-sensor data
-  to be useful; we don't have either yet, and §6.5 multi-frame CRC issues bit
-  whenever they ran at any meaningful rate.
-- KeyValue is self-describing (key string + float value), single-frame
-  per broadcast when keys are ≤3 chars, and ArduPilot forwards each as
-  MAVLink `NAMED_VALUE_FLOAT` → renderable in MP Quick tab and logged in
-  the FC dataflash as `NVF` entries.
+FC-side Lua script (`scripts/pcu_telem.lua`) polls each ID via
+`DroneCAN_get_FlexDebug(bus, node, id, last_us)`, decodes the float, and
+emits `gcs:send_named_float(name, value)` + `logger:write("PCU", ...)`.
+The named float lands in MP's Tuning view as `MAV_<NAME>` and in the tlog;
+the `PCU` rows go to the FC dataflash BIN (requires `LOG_DISARMED=1` on bench).
 
-### KeyValue field list (PCU → GCS)
+KeyValue was the previous design and is **not used** — stock AP doesn't
+subscribe to it.
 
-Each tick (200 ms) publishes the full set; all keys are 3 chars to keep
-each broadcast single-frame.
+### FlexDebug field list (PCU → GCS)
 
-| Key | Source field in `g_pt` | Unit |
-|---|---|---|
-| `DUT` | `ctl_duty_x10000` | % |
-| `THR` | `engine_throttle_pct_x100` | % |
-| `IRS` | `I_rect_cmd_cA` | A (setpoint) |
-| `IRM` | `rect_state.I_dc_cA` | A (measured) |
-| `VDC` | `rect_state.V_dc_cV` | V |
-| `IBF` | `ctl_i_bat_filt_cA` | A (filtered) |
-| `IBR` | `ctl_i_bat_ref_eff_cA` | A (reference) |
-| `RPM` | `rect_state.gen_rpm` | — |
-| `IGT` | `rect_state.igbt_temp_C` | °C |
-| `PRC` | `ctl_p_rect_W` | W |
-| `EST` | `engine_state` | enum 0..5 |
-| `FLT` | `fault_bits` | bitfield as int |
+| Flex ID | Name (MAVLink) | Source field in `g_pt` | Unit |
+|---|---|---|---|
+| 1  | `DUT` | `ctl_duty_x10000 / 100`              | % |
+| 2  | `THR` | `engine_throttle_pct_x100 / 100`     | % |
+| 3  | `IRS` | `I_rect_cmd_cA / 100`                | A (setpoint) |
+| 4  | `IRM` | `rect_state.I_dc_cA / 100`           | A (measured) |
+| 5  | `VDC` | `rect_state.V_dc_cV / 100`           | V |
+| 6  | `IBF` | `ctl_i_bat_filt_cA / 100`            | A (filtered) |
+| 7  | `IBR` | `ctl_i_bat_ref_eff_cA / 100`         | A (reference) |
+| 8  | `RPM` | `rect_state.gen_rpm`                 | — |
+| 9  | `IGT` | `rect_state.igbt_temp_C`             | °C |
+| 10 | `PRC` | `ctl_p_rect_W`                       | W |
+| 11 | `EST` | `engine_state`                       | enum 0..5 |
+| 12 | `FLT` | `fault_bits`                         | bitfield as float |
 
-To add a field: edit the `batch[]` array in `publish_debug_kv_batch()`
-in `fc_link_task.c`. Keep the new key ≤3 chars. Update this table.
+To add a field: add `FLEX_ID_*` in `fc_link_task.c`, append to `batch[]`
+in `publish_flex_debug_batch()`, mirror the row in `pcu_telem.lua` `FIELDS`.
+Name ≤ 10 chars (MAVLink limit). Update this table.
 
 ### Deleted publishers (do not resurrect)
 
-- `dsdl.lat.powertrain.PTConcise` (custom DTID 20100) — replaced by KeyValue. Deleted 2026-05-25.
+- `dsdl.lat.powertrain.PTConcise` (custom DTID 20100) — deleted 2026-05-25.
 - `dsdl.lat.powertrain.ThrottleDemand` (custom DTID 20101) — replaced by stock `esc.RawCommand`. Deleted 2026-05-25.
-- `uavcan.equipment.power.BatteryInfo` (DTID 1092) — battery data sourced from ESC telem on CAN2. Deleted 2026-05-26.
-- `uavcan.equipment.ice.reciprocating.Status` (DTID 1120) — engine RPM / temps go via KeyValue. Deleted 2026-05-26.
-- `uavcan.equipment.ice.FuelTankStatus` (DTID 1129) — no fuel sensor yet; when added, publish as KeyValue. Deleted 2026-05-26.
+- `uavcan.equipment.power.BatteryInfo`, `ice.reciprocating.Status`, `FuelTankStatus` — battery via Hobbywing ESC telem on CAN2; ICE telem fits in FlexDebug. Deleted 2026-05-26.
+- `uavcan.protocol.debug.KeyValue` — abandoned 2026-05-27 because stock AP has no subscriber.
+
+### 3.4 FC → PCU: Actuator channel (`uavcan.equipment.actuator.ArrayCommand`)
+
+Lua-driven engine_state command, using ArrayCommand instead of RawCommand
+because RawCommand is motor-arming-gated (zeros all entries when disarmed)
+and engine state must be controllable on a disarmed bench.
+
+| actuator_id | Source | Meaning | Decode bands |
+|---|---|---|---|
+| 8 | SERVO8 (Scripting1, `pcu_engine_rc.lua` from RC switch) | engine_state command | UNITLESS: < −0.5 OFF, −0.5..+0.5 CRANK, > +0.5 RUN. PWM: < 1300/1700 µs. |
+
+Required FC params:
+- `SERVO8_FUNCTION = 94`, `SERVO8_MIN = 1000`, `SERVO8_MAX = 2000`
+- `CAN_D1_UC_SRV_BM |= 128` (bit 7 — SERVO8)
+- `CAN_D1_UC_ESC_BM` must not include bit 7 (would route through the motor-gated path)
+
+No arming gate on the PCU side — `pt_request_engine_state()` is open while
+disarmed by design, to keep bench testing unrestricted.
 
 ---
 
@@ -357,22 +368,18 @@ Project" in this CubeIDE 1.19 patch level.
 `make all` and `make clean` to `cmake --build build/Debug`. Then importing
 as a Makefile project works. CubeIDE drives CMake transparently.
 
-### 6.5 Multi-frame TX issues with concurrent publishers
-**Symptom:** ICE Status (DTID 1120) arrived at the GCS with CRC mismatches;
-GetSet responses timed out before completing.
-**Root cause:** Autopilot's RawCommand at ~390 Hz dominates the bus, and
-PCU's libcanard memory pool (originally 2 KB) plus shallow can_manager TX
-queue (16) couldn't sustain multiple concurrent multi-frame transfers.
-**Resolution applied:**
-- Bumped `FC_LINK_MEM_POOL_BYTES` from 2048 to 8192.
-- Bumped `TX_QUEUE_DEPTH` in can_manager from 16 to 64.
-- Made GetSet response carry only `value + name` (default/min/max EMPTY)
-  to fit in fewer frames.
-- Bumped GetSet response priority from MEDIUM to HIGH.
-- All multi-frame publishers eventually deleted (2026-05-25, 2026-05-26)
-  in favour of single-frame KeyValue. The multi-frame fragility
-  diagnosis remains valid for any future multi-frame transfer added
-  back — see §3.3.
+### 6.5 Multi-frame TX issues — RESOLVED 2026-05-27
+**Symptom:** ICE Status / GetNodeInfo / KeyValue (when keys >3 chars) arrived
+with CRC mismatches and toggle-bit-out-of-sequence errors.
+**Root cause:** `MX_CAN1_Init()` had `TransmitFifoPriority = DISABLE`. bxCAN's
+3 TX mailboxes then arbitrate by CAN identifier instead of mailbox order; the
+N frames of a multi-frame transfer share one ID and fire out of order on the
+wire. Pool / queue tuning masked it for a single publisher but didn't fix it.
+**Resolution:** `TransmitFifoPriority = ENABLE` (via `.ioc` regen on 2026-05-27),
+together with the bitrate bump to 1 Mbps. Multi-frame TX is now safe — any
+future multi-frame publisher can be added without re-tripping this. Earlier
+mitigations (8 KB pool, 64-deep TX queue, HIGH priority GetSet response, terse
+GetSet response) are retained as headroom but no longer load-bearing.
 **Not yet fixed:** ICE Status full multi-frame round-trip — set aside.
 The CRC mismatch on assembly across long transfers under bus pressure
 needs further investigation (possibly a TAO setting mismatch or pool

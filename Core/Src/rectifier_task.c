@@ -18,6 +18,9 @@ static StaticQueue_t      s_rxq_cb;
 static can_frame_t        s_rxq_items[RECT_RX_QUEUE_DEPTH];
 static osMessageQueueId_t s_rx_q;
 
+/* Diagnostic: increments when can_mgr_send drops a frame (queue full + no mailbox). */
+volatile uint32_t g_rect_tx_drop = 0u;
+
 static void rectifier_task(void *arg);
 
 static inline int16_t clamp_i16(int16_t v, int16_t lo, int16_t hi) {
@@ -126,7 +129,7 @@ static void rectifier_task(void *arg) {
             break;
         }
         }
-        (void)can_mgr_send(CAN_BUS_ENGINE, &tx, 0);
+        if (!can_mgr_send(CAN_BUS_ENGINE, &tx, 0)) g_rect_tx_drop++;
 
         /* ---- 0x104 motor-type: on-change + keep-alive ---- */
         mt_ticks_since_tx++;
@@ -138,7 +141,7 @@ static void rectifier_task(void *arg) {
             };
             can_frame_t mt_tx;
             vesc_proto_encode_motor_type_cmd(&mt_cmd, &mt_tx);
-            (void)can_mgr_send(CAN_BUS_ENGINE, &mt_tx, 0);
+            if (!can_mgr_send(CAN_BUS_ENGINE, &mt_tx, 0)) g_rect_tx_drop++;
             prev_mt = mt_now;
             mt_ticks_since_tx = 0;
         }
@@ -153,7 +156,7 @@ static void rectifier_task(void *arg) {
             };
             can_frame_t id_tx;
             vesc_proto_encode_invert_dir_cmd(&id_cmd, &id_tx);
-            (void)can_mgr_send(CAN_BUS_ENGINE, &id_tx, 0);
+            if (!can_mgr_send(CAN_BUS_ENGINE, &id_tx, 0)) g_rect_tx_drop++;
             prev_id = id_now;
             id_ticks_since_tx = 0;
         }

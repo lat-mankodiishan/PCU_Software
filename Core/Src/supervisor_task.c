@@ -18,6 +18,11 @@
 #define PRIME_DUTY_X10000        6000      /* 60.00 % FOC inverted duty during PRIME */
 #define PRIME_THROTTLE_PCT_X100  6000      /* 60.00 % engine throttle during PRIME */
 
+/* Flip to 1 to put V1 controller back on the wire during ENGINE_RUN. */
+#define RUN_USE_V1_CONTROLLER    0
+#define RUN_DUTY_X10000          7500      /* 75.00 % fixed FOC duty in RUN */
+#define RUN_THROTTLE_PCT_X100    5000      /* 50.00 % fixed engine throttle in RUN */
+
 /* GPIO switch fires CRANK->RUN edge; same PA7 as expt button (mutually
  * exclusive contexts — expt_active gates supervisor out of the wire). */
 #define ENGINE_RUN_SWITCH_PORT   GPIOA
@@ -34,8 +39,10 @@ typedef enum {
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[256];
 
+#if RUN_USE_V1_CONTROLLER
 static ctl_v1_state_t  s_v1_state;
 static ctl_v1_params_t s_v1_params;
+#endif
 
 static engine_state_t s_prev_engine_state;
 static swap_phase_t   s_swap_phase;
@@ -45,8 +52,10 @@ static bool           s_switch_prev;
 static void supervisor_task(void *arg);
 
 void supervisor_task_start(void) {
+#if RUN_USE_V1_CONTROLLER
     control_law_v1_init(&s_v1_state);
     control_law_v1_default_params(&s_v1_params);
+#endif
     s_prev_engine_state = ENGINE_OFF;
     s_swap_phase        = SWAP_IDLE;
     s_swap_tick         = 0;
@@ -125,9 +134,12 @@ static bool swap_step(uint32_t now) {
 static void on_run_entry(void) {
     pt_set_motor_type(VESC_MOTOR_TYPE_FOC);
     pt_set_invert_direction(true);
+#if RUN_USE_V1_CONTROLLER
     control_law_v1_init(&s_v1_state);
+#endif
 }
 
+#if RUN_USE_V1_CONTROLLER
 static void run_v1(uint32_t now) {
     (void)now;
     ctl_v1_inputs_t in;
@@ -153,6 +165,17 @@ static void run_v1(uint32_t now) {
     g_pt.ctl_theta_pct_x100           = out.theta_engine_pct_x100;
     osMutexRelease(g_pt_mtx);
 }
+#else
+/* Open-loop fixed operating point: bench bring-up before V1 is trusted. */
+static void run_fixed_setpoint(void) {
+    pt_set_setpoint_duty(RUN_DUTY_X10000, MODE_CRUISE);
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    g_pt.engine_throttle_req_pct_x100 = RUN_THROTTLE_PCT_X100;
+    g_pt.ctl_duty_x10000              = RUN_DUTY_X10000;
+    g_pt.ctl_theta_pct_x100           = RUN_THROTTLE_PCT_X100;
+    osMutexRelease(g_pt_mtx);
+}
+#endif
 
 static void supervisor_task(void *arg) {
     (void)arg;
@@ -243,7 +266,11 @@ static void supervisor_task(void *arg) {
                 crank_hold();
                 break;
             case ENGINE_RUN:
+#if RUN_USE_V1_CONTROLLER
                 run_v1(now);
+#else
+                run_fixed_setpoint();
+#endif
                 break;
             case ENGINE_WARMUP:
             case ENGINE_COOLDOWN:

@@ -1,7 +1,19 @@
 # PCU Firmware — Function-Level Reference
 
-Generated 2026-04-27. Covers every `.c`/`.h` pair under `Core/`, plus
-`MIDWARE/`, `dsdl/`, generated codecs, and `Middlewares/Third_Party/libcanard/`.
+Generated 2026-04-27, partially refreshed 2026-05-28. Covers every `.c`/`.h` pair
+under `Core/`, plus `MIDWARE/`, `dsdl/`, generated codecs, and `libcanard/`.
+
+**Deltas since generation (read FC_PCU_Link.md and the source files as primary truth):**
+- `bms_task` disabled (battery telemetry via Hobbywing ESC on FC side).
+- `control_law_test.{c,h}` and legacy `control_law_init/step` deleted.
+- Custom DSDLs `PTConcise` / `ThrottleDemand` deleted (telemetry now uses
+  stock `dronecan.protocol.FlexDebug`, throttle uses stock `esc.RawCommand`).
+- ECU CHT/EGT fields removed from `g_pt` (no sensors wired; thermocouples on
+  MAX31855 instead). Only `ecu_rpm` + `ecu_engine_status` polled.
+- Supervisor runs at 5 Hz, not 100 Hz. V1 controller gains scaled accordingly.
+- `pt_request_engine_state()` is the only external setter; supervisor does the
+  4-phase swap (BLEED / LOCK / PRIME / RUN) on any CRANK→RUN.
+- CAN1 now 1 Mbps, PB8/PB9, `TransmitFifoPriority = ENABLE`.
 
 ---
 
@@ -25,18 +37,13 @@ the hardware-driver files (`ads1262.c`, `max31855.c`, `FATFS_SD.c`), and
 3. `MX_*_Init` peripherals: GPIO, CAN1, CAN2, DAC, I2C1, SPI1/2/3, TIM1, FATFS, IWDG (last)
 4. `osKernelInitialize`
 5. `MX_FREERTOS_Init`:
-   - `control_law_self_test()` — pure tests, halts in `Error_Handler` on fail
    - `pt_init()` — mutex + zero `g_pt`
    - `can_mgr_init()` — queues, dispatch task, IRQs armed
-   - `rectifier_task_start()`
-   - `supervisor_task_start()`
-   - `pdb_task_start()`
-   - `sensor_task_start()`
-   - `log_task_start()`
-   - `fc_link_task_start()` (no-op stub if codecs missing)
-   - `bms_task_start()`
-   - `ecu_task_start()`
-   - `defaultTask` created (bench stub)
+   - `rectifier_task_start()`, `supervisor_task_start()`, `pdb_task_start()`,
+     `sensor_task_start()`, `log_task_start()`, `fc_link_task_start()`,
+     `ecu_task_start()`, `rtos_stats_task_start()`, `dyno_sweep_task_start()`
+   - `bms_task_start()` — commented out (parked)
+   - `defaultTask` created (one-shot PC3 pulse + idle)
 6. `osKernelStart()` — never returns
 
 ---
@@ -342,25 +349,9 @@ kernel.
   - **IDLE / FAULT** → output = 0.
   - Clamp to int16, store, return.
 
-### `control_law_test.c` / `control_law_test.h`
-
-In-firmware self-test. Runs at boot inside `MX_FREERTOS_Init` before
-the kernel starts.
-
-- **`control_law_self_test()`** — 10 numbered tests:
-  1. TAKEOFF → peak.
-  2. CLIMB → peak.
-  3. LAND → peak.
-  4. IDLE → 0.
-  5. FAULT → 0.
-  6. CRUISE deadband holds setpoint within ±1 % bump.
-  7. CRUISE outside deadband trims by exactly `trim_step_cA`.
-  8. CRUISE no SOC bias → target = `I_load_full × dem / 10000`.
-  9. CRUISE with SOC bias → target += `soc_bias_cA`.
-  10. EMA filter converges on a 1000-tick step.
-  On any failure: writes the test ID into
-  `control_law_test_failed_id` (volatile, debugger-readable) and calls
-  `Error_Handler()`. On pass: clears the ID and returns.
+### `control_law_test.c` / `control_law_test.h` — DELETED 2026-05-27
+The legacy flight-mode controller and its self-test are gone. V1 controller
+in `control_law.c` is the only path.
 
 ### `powertrain_state.c` / `powertrain_state.h`
 
@@ -381,19 +372,20 @@ manually take the mutex.
 - **`pt_set_contactor_cmds(bat, rect)`** — supervisor sets desired
   contactor states; pdb_task mirrors to GPIOs.
 - `g_pt` definition (`powertrain_state_t`) — fields:
-  - **Setpoint**: `I_rect_cmd_cA`, `mode`.
-  - **Telemetry**: `rect_state`, `rect_state_tick`.
-  - **FC**: `fc_flight_state`, `fc_throttle_dem_pct`, `fc_input_tick`.
-  - **BMS**: `bms_soc_pct`, `bms_v_bat_cV`, `bms_i_bat_cA`,
-    `bms_max_cell_C`, `bms_input_tick`.
-  - **ECU**: `ecu_rpm`, `ecu_fuel_rate_dg_s`, `ecu_cht_C`,
-    `ecu_input_tick`.
-  - **Liveness**: `supervisor_heartbeat`.
+  - **Setpoint**: `rect_ctrl_mode`, `I_rect_cmd_cA`, `omega_e_cmd_erpm`, `duty_cmd_x10000`, `mode`.
+  - **Rect telem**: `rect_state`, `rect_state_tick`, `rect_motor_type`, `rect_invert_direction`.
+  - **FC**: `fc_flight_state`, `fc_throttle_dem_pct`, `fc_input_tick`, `fc_armed`, `fc_armed_tick`.
+  - **ECU**: `ecu_rpm`, `ecu_engine_status`, `ecu_input_tick`.
+  - **Engine state**: `engine_state`, `engine_state_tick`, `engine_state_req`, `engine_state_req_tick`.
+  - **V1 telemetry**: `ctl_i_bat_filt_cA`, `ctl_i_bat_ref_eff_cA`, `ctl_i_rect_demand_cA`, `ctl_p_rect_W`, `ctl_duty_x10000`, `ctl_theta_pct_x100`.
+  - **Sensors**: `current_sensor_mA[3]`, `current_sensor_tick`, `tc_C[3]`, `tc_valid[3]`, `tc_input_tick`.
+  - **Liveness**: `supervisor_heartbeat`, `cpu_load_pct`, `cpu_load_tick`.
   - **Contactors**: `contactor_battery_cmd`, `contactor_rectifier_cmd`.
   - **Faults**: `fault_bits` (uint16, `fault_id_t` flags).
-- `fault_id_t` enum (bits 0..7 allocated): `RECT_STALE`, `RECT_OFFLINE`,
-  `FC_STALE`, `BUS1_BUSOFF`, `BUS2_BUSOFF`, `SUPERVISOR_HANG`,
-  `BMS_STALE`, `ECU_STALE`. Bits 8..15 free.
+  - **Engine throttle**: `engine_throttle_req_pct_x100`, `engine_throttle_pct_x100`, `engine_throttle_pulse_us`, `engine_throttle_tick`.
+- `fault_id_t` enum: `RECT_STALE` (0), `RECT_OFFLINE` (1), `FC_STALE` (2),
+  `BUS1_BUSOFF` (3), `BUS2_BUSOFF` (4), `SUPERVISOR_HANG` (5), `ECU_STALE` (7).
+  Bit 6 reserved (was `BMS_STALE`). Bits 8..15 free.
 - `I_RECT_MAX_CA = 16000` (160 A) — hardware-of-last-resort clamp.
 
 ---
@@ -490,78 +482,53 @@ touches FatFs.
 
 ### `fc_link_task.c` / `fc_link_task.h`
 
-50 ms tick, `osPriorityAboveNormal` (4), 2 KB stack. Sole owner of
-`CanardInstance`. Wrapped in `__has_include` guards — no-op stub when
-`canard.h` and the generated codecs aren't present.
+50 ms tick (20 Hz), `osPriorityAboveNormal` (4), 2 KB stack. Sole owner of
+`CanardInstance` over an 8 KB static memory pool. Wrapped in `__has_include`
+guards.
 
-- **`fc_link_task_start()`** — creates the static 32-deep RX queue,
-  `can_mgr_subscribe(CAN_BUS_DRONECAN, 0, 0, ext=true)` (match-all),
-  `canardInit` over a 2 KB static memory pool,
-  `canardSetLocalNodeID(50)`, then creates the task.
-- **`should_accept`** *(static)* — libcanard filter callback. Accepts
-  broadcast `THROTTLEDEMAND` and `NODESTATUS`, fills the 64-bit
-  signature, rejects everything else.
-- **`on_transfer_received`** *(static)* — libcanard delivery callback.
-  - On `THROTTLEDEMAND`: `dsdl_lat_powertrain_ThrottleDemand_decode` →
-    `pt_set_fc_inputs(mode, throttle_pct × 100)`.
-  - On `NODESTATUS` (from FC): timestamp `s_fc_last_status_tick`,
-    clear `FAULT_FC_STALE`.
-- **`publish_pt_concise`** *(static)* — snapshot `g_pt`, build a
-  `PTConcise` (placeholder values for `i_load`/`i_bat`/
-  `fuel_consumption`), encode, `canardBroadcast` at priority MEDIUM.
-- **`publish_node_status(uptime)`** *(static)* — broadcast our 1 Hz
-  `NodeStatus` with `pt_get_faults()` as `vendor_specific_status_code`.
-- **`drain_canard_tx`** *(static)* — peek libcanard's TX queue, copy
-  into `can_frame_t`, `can_mgr_send` to CAN1, pop on success. Bail if
-  the manager queue is full — retry next tick.
-- **`fc_link_task`** *(static)* loop, every 50 ms:
-  1. Drain CAN1 RX queue → `canardHandleRxFrame` (timestamp in µs).
-  2. PTConcise every 50 ms; NodeStatus every 1000 ms.
-  3. Set `FAULT_FC_STALE` if last FC NodeStatus > 1 s old.
-  4. `drain_canard_tx`.
-  5. `canardCleanupStaleTransfers`.
+- **`fc_link_task_start()`** — RX queue (64-deep), match-all subscribe on CAN1,
+  `canardInit`, set local node 50, start task.
+- **`should_accept`** — admits broadcast `RawCommand`, `ActuatorArrayCommand`,
+  `NodeStatus`; service requests `GetNodeInfo` and `param.GetSet`.
+- **`on_transfer_received`** —
+  - `RawCommand`: average all motor channels → `pt_set_fc_inputs(...)`.
+  - `ActuatorArrayCommand`: walk `commands[]`. `actuator_id=8` → decode
+    OFF/CRANK/RUN bands and `pt_request_engine_state()`. `actuator_id=9` →
+    armed bit + `g_pt.fc_armed_tick`.
+  - `NodeStatus` from FC: stamp `s_fc_last_status_tick`, clear `FAULT_FC_STALE`.
+  - `GetNodeInfo` / `param.GetSet`: respond (engine_state SETs route through
+    `pt_request_engine_state` so the swap path is taken).
+- **TX publishers:**
+  - `publish_flex_debug_batch()` @ 5 Hz — 12 IDs, single-frame float32 each.
+  - `publish_node_status(uptime)` @ 1 Hz — `vendor_specific_status_code = pt_get_faults()`.
+- **Loop:** drain RX → libcanard; periodic publishers; FC stale check;
+  `drain_canard_tx`; `canardCleanupStaleTransfers`.
 
-### `bms_task.c` / `bms_task.h`
-
-100 ms tick, `osPriorityNormal` (3), 1 KB stack. **Placeholder.**
-
-- **`bms_task_start()`** — creates 8-deep RX queue, match-all subscribe
-  on `CAN_BUS_ENGINE` (will move to Bus 3 on H7), creates the task.
-- **`parse_bms_frame(*f)`** *(static)* — **stub returning false.**
-  TODO: decode protocol, write `g_pt.bms_*`, stamp `bms_input_tick`,
-  return `true`.
-- **`bms_task`** *(static)* loop, every 100 ms:
-  1. Drain RX → `parse_bms_frame` → on `true`, clear `FAULT_BMS_STALE`.
-  2. If `bms_input_tick` is set and older than 1 s → set
-     `FAULT_BMS_STALE`. Stale only arms after first parse.
+### `bms_task.c` / `bms_task.h` — DISABLED 2026-05-27
+File body wrapped in `#if 0`. Battery telemetry comes from the FC-side
+Hobbywing ESC stream, not from a CAN BMS on the PCU. `bms_*` fields and
+`FAULT_BMS_STALE` removed from `g_pt` and `fault_id_t`.
 
 ### `ecu_task.c` / `ecu_task.h`
 
-100 ms tick, `osPriorityNormal` (3), 1 KB stack. **Placeholder, and
-file header is now stale** — comments mention HFE/J1939 but the actual
-plan is Loweheiser MAVLink over UART (see
-`memory/project_ecu_loweheiser_mavlink.md`). Task must be refactored to
-a UART RX handler.
+100 ms poll (10 Hz), `osPriorityNormal` (3), 1.5 KB stack. Loweheiser ECU
+over USART2 using the MegaSquirt 'A' command (212-byte ochBlock).
 
-- **`ecu_task_start()`** — match-all subscribe on `CAN_BUS_ENGINE`
-  (wrong long-term — will move to UART). Creates task.
-- **`parse_ecu_frame(*f)`** *(static)* — stub returning false.
-- **`ecu_task`** *(static)* — same shape as `bms_task`.
+- **`ecu_task_start()`** — creates the task.
+- **`ecu_task`** *(static)* loop: send `'A'`, read 212 B, decode fields by
+  offset table. Currently extracts only `rpm` (uint16 @ 6) and `estat`
+  (uint8 @ 11). CHT/EGT slots removed — those come from MAX31855 (see
+  `sensor_task`). Stale fault `FAULT_ECU_STALE` if no successful poll for >1 s.
 
 ---
 
 ## 6. DSDL & libcanard
 
-### `dsdl/lat/powertrain/20100.PTConcise.uavcan`
-
-Broadcast PCU → FC at 20 Hz. DTID 20100. Fields: `egu_ok`, `batt_ok`,
-6× float16 (`v_bus`, `i_load`, `i_bat`, `i_rect`, `batt_soc`,
-`fuel_consumption`).
-
-### `dsdl/lat/powertrain/20101.ThrottleDemand.uavcan`
-
-Broadcast FC → PCU at 50 Hz. DTID 20101. `flight_phase` 4-bit enum
-(matches `flight_mode_t`), `throttle_pct` float16.
+### Custom DSDLs — DELETED 2026-05-25
+`PTConcise` (20100) and `ThrottleDemand` (20101) removed. Telemetry now uses
+stock `dronecan.protocol.FlexDebug` (DTID 16371, hand-coded encoder, signature
+`0xECA60382FF038F39`); throttle uses stock `uavcan.equipment.esc.RawCommand`.
+No custom DSDLs remain.
 
 ### `Middlewares/Third_Party/libcanard/`
 
