@@ -81,9 +81,9 @@ static void sensor_task(void *arg) {
                 /* Mirror current sensor channels into g_pt. */
                 osMutexAcquire(g_pt_mtx, osWaitForever);
                 for (uint8_t i = 0; i < SENSOR_NUM_ADC_CH && i < 3; ++i) {
-                    g_pt.current_sensor_mA[i] = (int32_t)scan.ch[i].value;
+                    g_pt.acs.mA[i] = (int32_t)scan.ch[i].value;
                 }
-                g_pt.current_sensor_tick = osKernelGetTickCount();
+                g_pt.acs.tick = osKernelGetTickCount();
                 osMutexRelease(g_pt_mtx);
             }
         }
@@ -103,10 +103,10 @@ static void sensor_task(void *arg) {
         /* Mirror TC readings into g_pt. */
         osMutexAcquire(g_pt_mtx, osWaitForever);
         for (uint8_t i = 0; i < SENSOR_NUM_TC && i < 3; ++i) {
-            g_pt.tc_C[i]     = (int16_t)s_data.tc[i].tc_temp;
-            g_pt.tc_valid[i] = s_data.tc_valid[i];
+            g_pt.tc.C[i]     = (int16_t)s_data.tc[i].tc_temp;
+            g_pt.tc.valid[i] = s_data.tc_valid[i];
         }
-        g_pt.tc_input_tick = osKernelGetTickCount();
+        g_pt.tc.tick = osKernelGetTickCount();
         osMutexRelease(g_pt_mtx);
 
         osMutexAcquire(s_mtx, osWaitForever);

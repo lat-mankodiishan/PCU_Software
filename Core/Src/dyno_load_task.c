@@ -87,9 +87,9 @@ static void dyno_load_task(void *arg) {
         int32_t i_target_mA;
         int32_t i_meas_mA;
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        active      = g_pt.dyno_load_active;
-        i_target_mA = g_pt.dyno_load_i_target_mA;
-        i_meas_mA   = g_pt.current_sensor_mA[DYNO_LOAD_ACS_CH];
+        active      = g_pt.dyno_load.active;
+        i_target_mA = g_pt.dyno_load.i_target_mA;
+        i_meas_mA   = g_pt.acs.mA[DYNO_LOAD_ACS_CH];
         osMutexRelease(g_pt_mtx);
 
         /* EMA on I_load; ride through ACS noise. */
@@ -146,10 +146,10 @@ static void dyno_load_task(void *arg) {
         pwm_set_pulse(s_pulse);
 
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        g_pt.dyno_load_pwm_us  = s_pulse;
-        g_pt.dyno_load_err_mA  = err;
-        g_pt.dyno_load_i_filt_mA = s_i_filt_mA;
-        g_pt.dyno_load_tick    = osKernelGetTickCount();
+        g_pt.dyno_load.pwm_us    = s_pulse;
+        g_pt.dyno_load.err_mA    = err;
+        g_pt.dyno_load.i_filt_mA = s_i_filt_mA;
+        g_pt.dyno_load.tick      = osKernelGetTickCount();
         osMutexRelease(g_pt_mtx);
 
         g_dyno_load_loops++;

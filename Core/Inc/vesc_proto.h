@@ -23,6 +23,9 @@
 #ifndef VESC_ID_GET_RECT_STATE_CONCISE
 #define VESC_ID_GET_RECT_STATE_CONCISE  0x201u
 #endif
+#ifndef VESC_ID_GET_RECT_STATE_EXTENDED
+#define VESC_ID_GET_RECT_STATE_EXTENDED 0x202u
+#endif
 
 /* Wire values; mirrors VESC mc_motor_type. */
 typedef enum {
@@ -87,10 +90,41 @@ typedef struct {
     uint8_t  seq;                  /* low 4 bits, wraps */
 } vesc_rect_state_t;
 
+/* VESC internal run state echoed in 0x202 byte 6 high nibble. Mirror these
+ * values on the VESC firmware side. Stays in 4 bits → 16 slots, 6 used. */
+typedef enum {
+    VESC_RUN_STATE_INIT    = 0,    /* booting, motor params not loaded */
+    VESC_RUN_STATE_IDLE    = 1,    /* no setpoint applied */
+    VESC_RUN_STATE_RAMP    = 2,    /* slewing toward setpoint */
+    VESC_RUN_STATE_RUN     = 3,    /* tracking setpoint */
+    VESC_RUN_STATE_LIMIT   = 4,    /* clamped (current/voltage/temp) */
+    VESC_RUN_STATE_FAULT   = 5,    /* in fault, output disabled */
+    /* 6..15 reserved */
+} vesc_run_state_t;
+
+/* 0x202 GetRectStateExtended — closes the "is VESC following PCU?" loop and
+ * exposes FOC observer health. Sent at the same cadence as 0x201 (or slower).
+ *
+ *   [0..1]  int16 LE duty_x10000   actual applied duty, signed
+ *   [2..3]  int16 LE Iq_cA         q-axis (torque) current, signed
+ *   [4..5]  int16 LE Id_cA         d-axis current, signed; should be ~0 in tuned FOC
+ *   [6]     low nibble: motor_type echo (vesc_motor_type_t)
+ *           high nibble: run_state (vesc_run_state_t)
+ *   [7]     CRC-8/SMBUS over [0..6]
+ */
+typedef struct {
+    int16_t           duty_x10000;     /* 0.01 %/LSB, signed */
+    int16_t           Iq_cA;           /* 0.01 A/LSB, signed (q-axis) */
+    int16_t           Id_cA;           /* 0.01 A/LSB, signed (d-axis) */
+    vesc_motor_type_t motor_type_echo; /* what VESC thinks its motor_type is */
+    vesc_run_state_t  run_state;       /* VESC's internal run-state machine */
+} vesc_rect_state_ext_t;
+
 typedef enum {
     VESC_DECODE_OK = 0,
     VESC_DECODE_BAD_ID,
     VESC_DECODE_BAD_LEN,
+    VESC_DECODE_BAD_CRC,
 } vesc_decode_t;
 
 uint8_t       vesc_crc8(const uint8_t *buf, uint8_t len);
@@ -103,5 +137,8 @@ void          vesc_proto_encode_invert_dir_cmd(const vesc_invert_dir_cmd_t *in, 
 
 vesc_decode_t vesc_proto_decode_rect_state_concise(const can_frame_t *in,
                                                    vesc_rect_state_t *out);
+
+vesc_decode_t vesc_proto_decode_rect_state_extended(const can_frame_t      *in,
+                                                    vesc_rect_state_ext_t  *out);
 
 #endif /* VESC_PROTO_H */

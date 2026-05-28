@@ -116,9 +116,9 @@ static void ecu_task(void *arg) {
             }
 
             osMutexAcquire(g_pt_mtx, osWaitForever);
-            g_pt.ecu_rpm           = (uint16_t)eng[ECU_F_RPM];
-            g_pt.ecu_engine_status = (uint8_t) eng[ECU_F_ENGINE_BYTE];
-            g_pt.ecu_input_tick    = osKernelGetTickCount();
+            g_pt.ecu.rpm           = (uint16_t)eng[ECU_F_RPM];
+            g_pt.ecu.engine_status = (uint8_t) eng[ECU_F_ENGINE_BYTE];
+            g_pt.ecu.tick          = osKernelGetTickCount();
             osMutexRelease(g_pt_mtx);
 
             pt_clear_fault(FAULT_ECU_STALE);
@@ -127,7 +127,7 @@ static void ecu_task(void *arg) {
 
         /* Staleness check; single failed poll won't raise fault. */
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        uint32_t last = g_pt.ecu_input_tick;
+        uint32_t last = g_pt.ecu.tick;
         osMutexRelease(g_pt_mtx);
         if (last && (osKernelGetTickCount() - last) > ECU_STALE_MS) {
             pt_set_fault(FAULT_ECU_STALE);

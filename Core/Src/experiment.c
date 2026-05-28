@@ -10,17 +10,17 @@
 
 static void mark_state(bool active, uint8_t phase_idx, const char *label) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.expt_active    = active;
-    g_pt.expt_phase_idx = phase_idx;
-    g_pt.expt_label     = label;
+    g_pt.expt.active    = active;
+    g_pt.expt.phase_idx = phase_idx;
+    g_pt.expt.label     = label;
     osMutexRelease(g_pt_mtx);
 }
 
 static bool consume_advance(void) {
     bool v;
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    v = g_pt.expt_advance_req;
-    if (v) g_pt.expt_advance_req = false;
+    v = g_pt.expt.advance_req;
+    if (v) g_pt.expt.advance_req = false;
     osMutexRelease(g_pt_mtx);
     return v;
 }
@@ -28,15 +28,15 @@ static bool consume_advance(void) {
 static bool peek_abort(void) {
     bool v;
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    v = g_pt.expt_abort_req;
+    v = g_pt.expt.abort_req;
     osMutexRelease(g_pt_mtx);
     return v;
 }
 
 static void clear_flags(void) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.expt_advance_req = false;
-    g_pt.expt_abort_req   = false;
+    g_pt.expt.advance_req = false;
+    g_pt.expt.abort_req   = false;
     osMutexRelease(g_pt_mtx);
 }
 
@@ -44,9 +44,9 @@ static int32_t prev_setpoint(rect_ctrl_mode_t mode) {
     int32_t v = 0;
     osMutexAcquire(g_pt_mtx, osWaitForever);
     switch (mode) {
-    case RECT_CTRL_CURRENT: v = (int32_t)g_pt.I_rect_cmd_cA;    break;
-    case RECT_CTRL_OMEGA:   v = g_pt.omega_e_cmd_erpm;          break;
-    case RECT_CTRL_DUTY:    v = (int32_t)g_pt.duty_cmd_x10000;  break;
+    case RECT_CTRL_CURRENT: v = (int32_t)g_pt.rect_cmd.I_cmd_cA;         break;
+    case RECT_CTRL_OMEGA:   v = g_pt.rect_cmd.omega_e_cmd_erpm;          break;
+    case RECT_CTRL_DUTY:    v = (int32_t)g_pt.rect_cmd.duty_cmd_x10000;  break;
     default: break;
     }
     osMutexRelease(g_pt_mtx);
@@ -149,12 +149,12 @@ void expt_run(const expt_profile_t *profile) {
 
 void expt_advance(void) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.expt_advance_req = true;
+    g_pt.expt.advance_req = true;
     osMutexRelease(g_pt_mtx);
 }
 
 void expt_abort(void) {
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.expt_abort_req = true;
+    g_pt.expt.abort_req = true;
     osMutexRelease(g_pt_mtx);
 }

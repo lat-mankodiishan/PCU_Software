@@ -33,9 +33,9 @@ static void dyno_sweep_task(void *arg) {
 
     /* Defensive boot clear; guards live-watch values surviving non-reset. */
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.expt_start_req   = false;
-    g_pt.expt_advance_req = false;
-    g_pt.expt_abort_req   = false;
+    g_pt.expt.start_req   = false;
+    g_pt.expt.advance_req = false;
+    g_pt.expt.abort_req   = false;
     osMutexRelease(g_pt_mtx);
 
     /* Edge-triggered start: false->true triggers a run. */
@@ -44,12 +44,12 @@ static void dyno_sweep_task(void *arg) {
     for (;;) {
         bool cur_start;
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        cur_start = g_pt.expt_start_req;
+        cur_start = g_pt.expt.start_req;
         osMutexRelease(g_pt_mtx);
 
         if (!prev_start && cur_start) {
             osMutexAcquire(g_pt_mtx, osWaitForever);
-            g_pt.expt_start_req = false;
+            g_pt.expt.start_req = false;
             osMutexRelease(g_pt_mtx);
 
             expt_run(EXPT_BOOT_PROFILE);
