@@ -59,9 +59,19 @@ typedef struct {
     uint16_t          fc_throttle_dem_pct;     /* 0.01 %/LSB */
     uint32_t          fc_input_tick;
 
-    /* ECU mirror; bookkeeping only — CHT/EGT come from MAX31855 (tc_C[]), not ECU. */
+    /* ECU mirror; bookkeeping only — primary CHT/EGT come from MAX31855 (tc_C[]). */
     uint16_t          ecu_rpm;
     uint8_t           ecu_engine_status;       /* bit0 ready, 1 crank, 2 startw, 3 warmup */
+    uint16_t          ecu_seconds;             /* since-boot counter, wraps at ~18 h */
+    int16_t           ecu_coolant_C_x10;       /* coolant/CHT, 0.1 °C */
+    int16_t           ecu_tps_pct_x10;         /* throttle position, 0.1 % */
+    int16_t           ecu_afr1_x10;            /* AFR cyl 1, 0.1 AFR */
+    int16_t           ecu_afr2_x10;            /* AFR cyl 2, 0.1 AFR */
+    uint16_t          ecu_pwmin0;              /* raw PWM-in ch 0 (timer counts) */
+    uint16_t          ecu_pwmin1;              /* raw PWM-in ch 1 */
+    uint16_t          ecu_pwmin2;              /* raw PWM-in ch 2 */
+    uint16_t          ecu_pwmin3;              /* raw PWM-in ch 3 */
+    uint8_t           ecu_rc_throttle;         /* clamped 0..100 %, derived from tps */
     uint32_t          ecu_input_tick;
 
     /* Engine lifecycle; written by fc_link or Live Watch. */

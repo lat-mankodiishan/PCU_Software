@@ -101,7 +101,14 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     __HAL_LINKDMA(uartHandle,hdmarx,hdma_usart2_rx);
 
   /* USER CODE BEGIN USART2_MspInit 1 */
-
+    /* Override PA3 (USART2_RX) with pull-up so an unpowered ECU's floating TX
+     * doesn't latch FE/NE errors. The generated init above uses GPIO_NOPULL. */
+    GPIO_InitStruct.Pin       = GPIO_PIN_3;
+    GPIO_InitStruct.Mode      = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull      = GPIO_PULLUP;
+    GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
   /* USER CODE END USART2_MspInit 1 */
   }
 }

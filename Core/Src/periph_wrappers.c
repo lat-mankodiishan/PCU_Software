@@ -212,13 +212,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART2) {
         g_ecu_uart_last_error = huart->ErrorCode;
+        __HAL_UART_CLEAR_PEFLAG(huart);
+        huart->ErrorCode = HAL_UART_ERROR_NONE;
     }
 }
 
 void ecu_uart_hw_flush_rx(void) {
-    /* Clear ORE/FE/NE and drain DR; mirrors pyserial reset_input_buffer. */
-    __HAL_UART_CLEAR_OREFLAG(&huart2);
+    /* SR-then-DR read clears PE/FE/NE/ORE/IDLE in one shot on F4; needed so a
+     * floating RX line (ECU unpowered) can't latch us into a permanent wedge. */
+    __HAL_UART_CLEAR_PEFLAG(&huart2);
     while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
         (void)huart2.Instance->DR;
     }
+    huart2.ErrorCode = HAL_UART_ERROR_NONE;
 }
