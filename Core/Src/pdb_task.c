@@ -42,8 +42,8 @@ static void pdb_task(void *arg) {
 
         osMutexAcquire(g_pt_mtx, osWaitForever);
         hb       = g_pt.supervisor_heartbeat;
-        bat_cmd  = g_pt.contactor_battery_cmd;
-        rect_cmd = g_pt.contactor_rectifier_cmd;
+        bat_cmd  = g_pt.contactor_cmd.battery;
+        rect_cmd = g_pt.contactor_cmd.rectifier;
         osMutexRelease(g_pt_mtx);
 
         uint32_t now = osKernelGetTickCount();

@@ -107,3 +107,17 @@ vesc_decode_t vesc_proto_decode_rect_state_concise(const can_frame_t *in,
     out->seq         = (uint8_t)(in->data[7] & 0x0F);
     return VESC_DECODE_OK;
 }
+
+vesc_decode_t vesc_proto_decode_rect_state_extended(const can_frame_t     *in,
+                                                    vesc_rect_state_ext_t *out) {
+    if (in->id != VESC_ID_GET_RECT_STATE_EXTENDED) return VESC_DECODE_BAD_ID;
+    if (in->dlc != 8 || in->rtr != 0)              return VESC_DECODE_BAD_LEN;
+    if (vesc_crc8(in->data, 7) != in->data[7])     return VESC_DECODE_BAD_CRC;
+
+    out->duty_x10000     = (int16_t)get_u16_le(&in->data[0]);
+    out->Iq_cA           = (int16_t)get_u16_le(&in->data[2]);
+    out->Id_cA           = (int16_t)get_u16_le(&in->data[4]);
+    out->motor_type_echo = (vesc_motor_type_t)(in->data[6] & 0x0F);
+    out->run_state       = (vesc_run_state_t)((in->data[6] >> 4) & 0x0F);
+    return VESC_DECODE_OK;
+}

@@ -44,6 +44,11 @@ void rectifier_task_start(void) {
                       0x7FFu, /* exact-match 11-bit */
                       false,
                       s_rx_q);
+    can_mgr_subscribe(CAN_BUS_ENGINE,
+                      VESC_ID_GET_RECT_STATE_EXTENDED,
+                      0x7FFu, /* exact-match 11-bit */
+                      false,
+                      s_rx_q);
 
     static const osThreadAttr_t tattr = {
         .name       = "rectifier",
@@ -75,14 +80,24 @@ static void rectifier_task(void *arg) {
     for (;;) {
         /* ---- RX drain ---- */
         while (osMessageQueueGet(s_rx_q, &f, NULL, 0) == osOK) {
-            vesc_rect_state_t s;
-            if (vesc_proto_decode_rect_state_concise(&f, &s) != VESC_DECODE_OK)
-                continue;
-            osMutexAcquire(g_pt_mtx, osWaitForever);
-            g_pt.rect_state      = s;
-            g_pt.rect_state_tick = osKernelGetTickCount();
-            osMutexRelease(g_pt_mtx);
-            pt_clear_fault(FAULT_RECT_STALE);
+            if (f.id == VESC_ID_GET_RECT_STATE_CONCISE) {
+                vesc_rect_state_t s;
+                if (vesc_proto_decode_rect_state_concise(&f, &s) != VESC_DECODE_OK)
+                    continue;
+                osMutexAcquire(g_pt_mtx, osWaitForever);
+                g_pt.rect.state = s;
+                g_pt.rect.tick  = osKernelGetTickCount();
+                osMutexRelease(g_pt_mtx);
+                pt_clear_fault(FAULT_RECT_STALE);
+            } else if (f.id == VESC_ID_GET_RECT_STATE_EXTENDED) {
+                vesc_rect_state_ext_t e;
+                if (vesc_proto_decode_rect_state_extended(&f, &e) != VESC_DECODE_OK)
+                    continue;
+                osMutexAcquire(g_pt_mtx, osWaitForever);
+                g_pt.rect.state_ext = e;
+                g_pt.rect.ext_tick  = osKernelGetTickCount();
+                osMutexRelease(g_pt_mtx);
+            }
         }
 
         /* ---- TX snapshot + clamp; one of 0x101/0x102/0x103 per tick ---- */
@@ -94,13 +109,13 @@ static void rectifier_task(void *arg) {
         vesc_motor_type_t mt_now;
         uint8_t   id_now;
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        mode_now  = g_pt.rect_ctrl_mode;
-        I_cA_now  = clamp_i16(g_pt.I_rect_cmd_cA,    -I_RECT_MAX_CA,   I_RECT_MAX_CA);
-        omega_now = clamp_i32(g_pt.omega_e_cmd_erpm, -OMEGA_E_MAX_ERPM, OMEGA_E_MAX_ERPM);
-        duty_now  = clamp_i16(g_pt.duty_cmd_x10000,  -DUTY_MAX_X10000,  DUTY_MAX_X10000);
-        pt_mode   = g_pt.mode;
-        mt_now    = g_pt.rect_motor_type;
-        id_now    = g_pt.rect_invert_direction ? 1u : 0u;
+        mode_now  = g_pt.rect_cmd.ctrl_mode;
+        I_cA_now  = clamp_i16(g_pt.rect_cmd.I_cmd_cA,         -I_RECT_MAX_CA,    I_RECT_MAX_CA);
+        omega_now = clamp_i32(g_pt.rect_cmd.omega_e_cmd_erpm, -OMEGA_E_MAX_ERPM, OMEGA_E_MAX_ERPM);
+        duty_now  = clamp_i16(g_pt.rect_cmd.duty_cmd_x10000,  -DUTY_MAX_X10000,  DUTY_MAX_X10000);
+        pt_mode   = g_pt.rect_cmd.mode;
+        mt_now    = g_pt.rect_cmd.motor_type;
+        id_now    = g_pt.rect_cmd.invert_direction ? 1u : 0u;
         osMutexRelease(g_pt_mtx);
 
         const uint8_t seq_now = seq++;
@@ -160,7 +175,7 @@ static void rectifier_task(void *arg) {
 
         /* ---- Staleness check ---- */
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        uint32_t last = g_pt.rect_state_tick;
+        uint32_t last = g_pt.rect.tick;
         osMutexRelease(g_pt_mtx);
         if (last && (osKernelGetTickCount() - last) > RECT_STALE_MS) {
             pt_set_fault(FAULT_RECT_STALE);

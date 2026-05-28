@@ -259,7 +259,7 @@ static void handle_param_get_set(const CanardRxTransfer *req) {
 
         engine_state_t cur;
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        cur = g_pt.engine_state;
+        cur = g_pt.engine.state;
         osMutexRelease(g_pt_mtx);
 
         rsp.value.union_tag         = UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE;
@@ -409,18 +409,18 @@ static void publish_flex_debug_batch(void) {
     osMutexRelease(g_pt_mtx);
 
     const flex_field_t batch[] = {
-        { FLEX_ID_DUT, pt.ctl_duty_x10000          / 100.0f },
-        { FLEX_ID_THR, pt.engine_throttle_pct_x100 / 100.0f },
-        { FLEX_ID_IRS, pt.I_rect_cmd_cA            / 100.0f },
-        { FLEX_ID_IRM, pt.rect_state.I_dc_cA       / 100.0f },
-        { FLEX_ID_VDC, pt.rect_state.V_dc_cV       / 100.0f },
-        { FLEX_ID_IBF, pt.ctl_i_bat_filt_cA        / 100.0f },
-        { FLEX_ID_IBR, pt.ctl_i_bat_ref_eff_cA     / 100.0f },
-        { FLEX_ID_RPM, (float)pt.rect_state.gen_rpm        },
-        { FLEX_ID_IGT, (float)pt.rect_state.igbt_temp_C    },
-        { FLEX_ID_PRC, (float)pt.ctl_p_rect_W              },
-        { FLEX_ID_EST, (float)pt.engine_state              },
-        { FLEX_ID_FLT, (float)pt.fault_bits                },
+        { FLEX_ID_DUT, pt.ctl.duty_x10000                  / 100.0f },
+        { FLEX_ID_THR, pt.engine_throttle.applied_pct_x100 / 100.0f },
+        { FLEX_ID_IRS, pt.rect_cmd.I_cmd_cA                / 100.0f },
+        { FLEX_ID_IRM, pt.rect.state.I_dc_cA               / 100.0f },
+        { FLEX_ID_VDC, pt.rect.state.V_dc_cV               / 100.0f },
+        { FLEX_ID_IBF, pt.ctl.i_bat_filt_cA                / 100.0f },
+        { FLEX_ID_IBR, pt.ctl.i_bat_ref_eff_cA             / 100.0f },
+        { FLEX_ID_RPM, (float)pt.rect.state.gen_rpm                },
+        { FLEX_ID_IGT, (float)pt.rect.state.igbt_temp_C            },
+        { FLEX_ID_PRC, (float)pt.ctl.p_rect_W                      },
+        { FLEX_ID_EST, (float)pt.engine.state                      },
+        { FLEX_ID_FLT, (float)pt.fault_bits                        },
     };
     for (size_t i = 0; i < sizeof(batch)/sizeof(batch[0]); i++) {
         publish_flex_debug_float(batch[i].flex_id, batch[i].value);

@@ -67,7 +67,7 @@ static void safe_idle(void) {
     /* OFF/FAULT: duty=0 + throttle=0. */
     pt_set_setpoint(0, MODE_IDLE);
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.engine_throttle_req_pct_x100 = 0;
+    g_pt.engine_throttle.req_pct_x100 = 0;
     osMutexRelease(g_pt_mtx);
 }
 
@@ -105,13 +105,13 @@ static bool swap_step(uint32_t now) {
         /* Open-loop prime at PRIME_DUTY/PRIME_THROTTLE before V1 takes over. */
         pt_set_setpoint_duty(PRIME_DUTY_X10000, MODE_TAKEOFF);
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        g_pt.engine_throttle_req_pct_x100 = PRIME_THROTTLE_PCT_X100;
+        g_pt.engine_throttle.req_pct_x100 = PRIME_THROTTLE_PCT_X100;
         osMutexRelease(g_pt_mtx);
         if (elapsed >= SWAP_PRIME_MS) {
             s_swap_phase = SWAP_IDLE;
             pt_set_engine_state(ENGINE_RUN);
             osMutexAcquire(g_pt_mtx, osWaitForever);
-            g_pt.engine_state_req = ENGINE_STATE_REQ_NONE;
+            g_pt.engine.req = ENGINE_STATE_REQ_NONE;
             osMutexRelease(g_pt_mtx);
         }
         return true;
@@ -133,9 +133,9 @@ static void run_v1(uint32_t now) {
     ctl_v1_inputs_t in;
     osMutexAcquire(g_pt_mtx, osWaitForever);
     /* ACS ch2 = I_bat (mA, +discharge). cA = mA/10. */
-    in.i_bat_meas_cA  = (int16_t)(g_pt.current_sensor_mA[2] / 10);
-    in.v_bus_cV       = g_pt.rect_state.V_dc_cV;
-    in.gen_rpm        = g_pt.rect_state.gen_rpm;
+    in.i_bat_meas_cA  = (int16_t)(g_pt.acs.mA[2] / 10);
+    in.v_bus_cV       = g_pt.rect.state.V_dc_cV;
+    in.gen_rpm        = g_pt.rect.state.gen_rpm;
     osMutexRelease(g_pt_mtx);
 
     ctl_v1_output_t out;
@@ -144,13 +144,13 @@ static void run_v1(uint32_t now) {
     pt_set_setpoint_duty((int16_t)out.duty_x10000, MODE_CRUISE);
 
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.engine_throttle_req_pct_x100 = out.theta_engine_pct_x100;
-    g_pt.ctl_i_bat_filt_cA            = s_v1_state.i_bat_filt_cA;
-    g_pt.ctl_i_bat_ref_eff_cA         = out.i_bat_ref_eff_cA;
-    g_pt.ctl_i_rect_demand_cA         = out.i_rect_demand_cA;
-    g_pt.ctl_p_rect_W                 = out.p_rect_W;
-    g_pt.ctl_duty_x10000              = out.duty_x10000;
-    g_pt.ctl_theta_pct_x100           = out.theta_engine_pct_x100;
+    g_pt.engine_throttle.req_pct_x100 = out.theta_engine_pct_x100;
+    g_pt.ctl.i_bat_filt_cA            = s_v1_state.i_bat_filt_cA;
+    g_pt.ctl.i_bat_ref_eff_cA         = out.i_bat_ref_eff_cA;
+    g_pt.ctl.i_rect_demand_cA         = out.i_rect_demand_cA;
+    g_pt.ctl.p_rect_W                 = out.p_rect_W;
+    g_pt.ctl.duty_x10000              = out.duty_x10000;
+    g_pt.ctl.theta_pct_x100           = out.theta_engine_pct_x100;
     osMutexRelease(g_pt_mtx);
 }
 
@@ -167,10 +167,10 @@ static void supervisor_task(void *arg) {
         bool           expt_active;
 
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        engine_state     = g_pt.engine_state;
-        engine_state_req = g_pt.engine_state_req;
+        engine_state     = g_pt.engine.state;
+        engine_state_req = g_pt.engine.req;
         faults           = g_pt.fault_bits;
-        expt_active      = g_pt.expt_active;
+        expt_active      = g_pt.expt.active;
         osMutexRelease(g_pt_mtx);
 
         /* External request: RUN goes via swap (CRANK only); others apply direct. */
@@ -186,12 +186,12 @@ static void supervisor_task(void *arg) {
                 pt_set_engine_state(engine_state_req);
                 engine_state = engine_state_req;
                 osMutexAcquire(g_pt_mtx, osWaitForever);
-                g_pt.engine_state_req = ENGINE_STATE_REQ_NONE;
+                g_pt.engine.req = ENGINE_STATE_REQ_NONE;
                 osMutexRelease(g_pt_mtx);
             }
         } else if (engine_state_req == engine_state) {
             osMutexAcquire(g_pt_mtx, osWaitForever);
-            g_pt.engine_state_req = ENGINE_STATE_REQ_NONE;
+            g_pt.engine.req = ENGINE_STATE_REQ_NONE;
             osMutexRelease(g_pt_mtx);
         }
 
@@ -270,7 +270,7 @@ static void supervisor_task(void *arg) {
          * operator/Live Watch owns it. */
         uint16_t eng_req;
         osMutexAcquire(g_pt_mtx, osWaitForever);
-        eng_req = g_pt.engine_throttle_req_pct_x100;
+        eng_req = g_pt.engine_throttle.req_pct_x100;
         osMutexRelease(g_pt_mtx);
         pt_set_engine_throttle_pct_x100(eng_req);
 

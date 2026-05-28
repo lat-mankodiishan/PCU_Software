@@ -107,8 +107,8 @@ static void stats_task(void *arg) {
                                                        : (uint8_t)(100u - idle_pct);
 
                 osMutexAcquire(g_pt_mtx, osWaitForever);
-                g_pt.cpu_load_pct  = load_pct;
-                g_pt.cpu_load_tick = osKernelGetTickCount();
+                g_pt.cpu.load_pct = load_pct;
+                g_pt.cpu.tick     = osKernelGetTickCount();
                 osMutexRelease(g_pt_mtx);
             }
         }

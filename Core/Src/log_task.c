@@ -60,6 +60,7 @@ static void log_task(void *arg) {
     f_puts("ms,"
            "mode,ctrl_mode,I_cmd_cA,omega_cmd,duty_cmd,"
            "V_dc_cV,I_dc_cA,gen_rpm,igbt_C,rect_fault,rect_seq,rect_tick,"
+           "duty_act,Iq_cA,Id_cA,vrun,vmt_echo,ext_tick,"
            "fc_state,fc_thr_pct,fc_tick,"
            "ecu_rpm,ecu_estat,ecu_tick,"
            "eng_state,eng_state_tick,"
@@ -81,12 +82,13 @@ static void log_task(void *arg) {
         sensor_data_get(&sd);
 
         /* TC temps as int32 cdeg (x100 C) to avoid printf-float linkage. */
-        const char *expt_label = pt.expt_label ? pt.expt_label : "";
+        const char *expt_label = pt.expt.label ? pt.expt.label : "";
 
         int n = snprintf(s_line, sizeof(s_line),
             "%lu,"
             "%u,%u,%d,%ld,%d,"
             "%u,%d,%u,%d,%u,%u,%lu,"
+            "%d,%d,%d,%u,%u,%lu,"
             "%u,%u,%lu,"
             "%u,%u,%lu,"
             "%u,%lu,"
@@ -96,28 +98,31 @@ static void log_task(void *arg) {
             "%u,%u,%s,"
             "%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
             (unsigned long)osKernelGetTickCount(),
-            (unsigned)pt.mode, (unsigned)pt.rect_ctrl_mode,
-            pt.I_rect_cmd_cA, (long)pt.omega_e_cmd_erpm, pt.duty_cmd_x10000,
-            pt.rect_state.V_dc_cV, pt.rect_state.I_dc_cA,
-            pt.rect_state.gen_rpm, pt.rect_state.igbt_temp_C,
-            pt.rect_state.fault_bits, pt.rect_state.seq,
-            (unsigned long)pt.rect_state_tick,
-            (unsigned)pt.fc_flight_state, pt.fc_throttle_dem_pct,
-            (unsigned long)pt.fc_input_tick,
-            pt.ecu_rpm,
-            (unsigned)pt.ecu_engine_status,
-            (unsigned long)pt.ecu_input_tick,
-            (unsigned)pt.engine_state,
-            (unsigned long)pt.engine_state_tick,
-            pt.ctl_i_bat_filt_cA, pt.ctl_i_bat_ref_eff_cA,
-            pt.ctl_i_rect_demand_cA,
-            (unsigned long)pt.ctl_p_rect_W,
-            pt.ctl_duty_x10000, pt.ctl_theta_pct_x100,
+            (unsigned)pt.rect_cmd.mode, (unsigned)pt.rect_cmd.ctrl_mode,
+            pt.rect_cmd.I_cmd_cA, (long)pt.rect_cmd.omega_e_cmd_erpm, pt.rect_cmd.duty_cmd_x10000,
+            pt.rect.state.V_dc_cV, pt.rect.state.I_dc_cA,
+            pt.rect.state.gen_rpm, pt.rect.state.igbt_temp_C,
+            pt.rect.state.fault_bits, pt.rect.state.seq,
+            (unsigned long)pt.rect.tick,
+            pt.rect.state_ext.duty_x10000, pt.rect.state_ext.Iq_cA, pt.rect.state_ext.Id_cA,
+            (unsigned)pt.rect.state_ext.run_state, (unsigned)pt.rect.state_ext.motor_type_echo,
+            (unsigned long)pt.rect.ext_tick,
+            (unsigned)pt.fc.flight_state, pt.fc.throttle_dem_pct,
+            (unsigned long)pt.fc.tick,
+            pt.ecu.rpm,
+            (unsigned)pt.ecu.engine_status,
+            (unsigned long)pt.ecu.tick,
+            (unsigned)pt.engine.state,
+            (unsigned long)pt.engine.state_tick,
+            pt.ctl.i_bat_filt_cA, pt.ctl.i_bat_ref_eff_cA,
+            pt.ctl.i_rect_demand_cA,
+            (unsigned long)pt.ctl.p_rect_W,
+            pt.ctl.duty_x10000, pt.ctl.theta_pct_x100,
             (unsigned long)pt.supervisor_heartbeat,
-            (unsigned)pt.contactor_battery_cmd,
-            (unsigned)pt.contactor_rectifier_cmd,
+            (unsigned)pt.contactor_cmd.battery,
+            (unsigned)pt.contactor_cmd.rectifier,
             pt.fault_bits,
-            (unsigned)pt.expt_active, (unsigned)pt.expt_phase_idx, expt_label,
+            (unsigned)pt.expt.active, (unsigned)pt.expt.phase_idx, expt_label,
             (long)(sd.tc[0].tc_temp * 100.0f),
             (long)(sd.tc[1].tc_temp * 100.0f),
             (long)(sd.tc[2].tc_temp * 100.0f),

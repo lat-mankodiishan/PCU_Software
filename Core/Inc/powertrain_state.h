@@ -38,89 +38,162 @@ typedef enum {
     ENGINE_FAULT    = 5,
 } engine_state_t;
 
+/* === Sub-struct definitions ===
+ *
+ * Each sub-struct groups fields with a single producer and a small set of
+ * consumers. See the producer/consumer map in the cleanup plan for who
+ * writes/reads what. All access goes through pt_* helpers in
+ * powertrain_state.c; this file's sub-struct types let those helpers take
+ * typed pointers instead of individual field arguments.
+ */
+
+/* Rectifier setpoint: supervisor / experiment.c -> rectifier_task.
+ * ctrl_mode picks which one of I_cmd_cA / omega_e_cmd_erpm / duty_cmd_x10000
+ * the rectifier task TXes on the wire. */
 typedef struct {
-    /* Setpoint: supervisor -> rectifier_task; rect_ctrl_mode picks the wire frame. */
-    rect_ctrl_mode_t  rect_ctrl_mode;
-    int16_t           I_rect_cmd_cA;       /* 0.01 A/LSB */
-    int32_t           omega_e_cmd_erpm;    /* 1 eRPM/LSB */
-    int16_t           duty_cmd_x10000;     /* 0.01 %/LSB */
-    flight_mode_t       mode;
+    rect_ctrl_mode_t  ctrl_mode;
+    int16_t           I_cmd_cA;            /* 0.01 A/LSB,  RECT_CTRL_CURRENT */
+    int32_t           omega_e_cmd_erpm;    /* 1 eRPM/LSB,  RECT_CTRL_OMEGA   */
+    int16_t           duty_cmd_x10000;     /* 0.01 %/LSB,  RECT_CTRL_DUTY    */
+    flight_mode_t     mode;
+    vesc_motor_type_t motor_type;          /* drives 0x104 SendMotorTypeCmd */
+    bool              invert_direction;    /* drives 0x105 SendInvertDirCmd */
+} pt_rect_cmd_t;
 
-    /* Drives 0x104 SendMotorTypeCmd; default FOC for regen. */
-    vesc_motor_type_t rect_motor_type;
+/* Rectifier telemetry: rectifier_task -> readers.
+ *   state / tick         : decoded 0x201 GetRectStateConcise (V/I/RPM/IGBT/fault).
+ *   state_ext / ext_tick : decoded 0x202 GetRectStateExtended (duty/Iq/Id/state).
+ * ext_tick stays 0 until the matching VESC-side encoder is deployed. */
+typedef struct {
+    vesc_rect_state_t     state;
+    uint32_t              tick;
+    vesc_rect_state_ext_t state_ext;
+    uint32_t              ext_tick;
+} pt_rect_telem_t;
 
-    /* Drives 0x105 SendInvertDirCmd; compensates BLDC<->FOC direction flip. */
-    bool              rect_invert_direction;
+/* Flight-controller inputs: fc_link_task -> supervisor / log. */
+typedef struct {
+    flight_mode_t  flight_state;
+    uint16_t       throttle_dem_pct;       /* 0.01 %/LSB */
+    uint32_t       tick;
+} pt_fc_t;
 
-    vesc_rect_state_t rect_state;
-    uint32_t          rect_state_tick;
+/* ECU mirror: ecu_task (Loweheiser UART2 DMA) -> log / fc_link.
+ * CHT/EGT come from MAX31855 (pt_tc_t), not ECU. */
+typedef struct {
+    uint16_t  rpm;
+    uint8_t   engine_status;               /* bit0 ready, 1 crank, 2 startw, 3 warmup */
+    uint32_t  tick;
+} pt_ecu_t;
 
-    flight_mode_t       fc_flight_state;
-    uint16_t          fc_throttle_dem_pct;     /* 0.01 %/LSB */
-    uint32_t          fc_input_tick;
+/* Engine lifecycle:
+ *   state / state_tick : committed by supervisor via pt_set_engine_state.
+ *   req   / req_tick   : set by fc_link (RC) or operator (Live Watch) via
+ *                        pt_request_engine_state; supervisor consumes and
+ *                        clears to ENGINE_STATE_REQ_NONE. */
+typedef struct {
+    engine_state_t  state;
+    uint32_t        state_tick;
+    engine_state_t  req;
+    uint32_t        req_tick;
+} pt_engine_state_t;
 
-    /* ECU mirror; bookkeeping only — CHT/EGT come from MAX31855 (tc_C[]), not ECU. */
-    uint16_t          ecu_rpm;
-    uint8_t           ecu_engine_status;       /* bit0 ready, 1 crank, 2 startw, 3 warmup */
-    uint32_t          ecu_input_tick;
+/* Engine throttle servo (PA8 TIM1_CH1, 1667..2879 us = 0..100 %).
+ *   req_pct_x100     : supervisor V1 output OR operator override (Live Watch).
+ *   applied_pct_x100 : mirror of last value pushed through
+ *                      pt_set_engine_throttle_pct_x100 (which also writes
+ *                      the PWM hardware).
+ *   pulse_us         : computed from applied_pct_x100. */
+typedef struct {
+    uint16_t  req_pct_x100;                /* 0..10000 */
+    uint16_t  applied_pct_x100;            /* 0..10000 */
+    uint16_t  pulse_us;
+    uint32_t  tick;
+} pt_engine_throttle_t;
 
-    /* Engine lifecycle; written by fc_link or Live Watch. */
-    engine_state_t    engine_state;
-    uint32_t          engine_state_tick;
+/* V1 controller telemetry mirror; supervisor writes each tick in ENGINE_RUN.
+ * Read by log_task and the debugger for inspection — not in any control path. */
+typedef struct {
+    int16_t   i_bat_filt_cA;               /* EMA-filtered ACS ch2 */
+    int16_t   i_bat_ref_eff_cA;            /* setpoint after safety boost */
+    int16_t   i_rect_demand_cA;            /* slew-limited PID output */
+    uint32_t  p_rect_W;                    /* I_rect_demand * V_bus */
+    uint16_t  duty_x10000;                 /* LUT output */
+    uint16_t  theta_pct_x100;              /* LUT output */
+} pt_ctl_telem_t;
 
-    /* External request; supervisor applies it (CRANK->RUN via swap). */
-    engine_state_t    engine_state_req;
-    uint32_t          engine_state_req_tick;
+/* ACS772ECB-300B current sensors on ADS1262 AIN0/1/2; signed mA.
+ * Written by sensor_task; ch2 feeds the V1 control law's I_bat input;
+ * ch[DYNO_LOAD_ACS_CH] feeds dyno_load_task. */
+typedef struct {
+    int32_t   mA[3];
+    uint32_t  tick;
+} pt_acs_t;
 
-    /* V1 controller telemetry (mirrored each tick when engine_state == ENGINE_RUN). */
-    int16_t           ctl_i_bat_filt_cA;     /* EMA-filtered ACS ch2 */
-    int16_t           ctl_i_bat_ref_eff_cA;  /* setpoint after safety boost */
-    int16_t           ctl_i_rect_demand_cA;  /* slew-limited PID output */
-    uint32_t          ctl_p_rect_W;          /* I_rect_demand * V_bus */
-    uint16_t          ctl_duty_x10000;       /* LUT output */
-    uint16_t          ctl_theta_pct_x100;    /* LUT output */
+/* 3x MAX31855 K-type thermocouples on hspi2; whole °C, signed. */
+typedef struct {
+    int16_t   C[3];
+    bool      valid[3];
+    uint32_t  tick;
+} pt_tc_t;
 
-    volatile uint32_t supervisor_heartbeat;
+/* CPU load from rtos_stats (idle-counter derived). */
+typedef struct {
+    uint8_t   load_pct;
+    uint32_t  tick;
+} pt_cpu_t;
 
-    bool              contactor_battery_cmd;
-    bool              contactor_rectifier_cmd;
+/* Experiment runner state. label points into static profile data, so it
+ * lives as long as the firmware does. The three _req flags are operator
+ * hooks (Live Watch) — also poked by dyno_sweep_task which uses them as
+ * its own state-machine signals. */
+typedef struct {
+    bool         active;
+    uint8_t      phase_idx;
+    const char  *label;
+    bool         advance_req;
+    bool         abort_req;
+    bool         start_req;
+} pt_expt_t;
 
-    uint16_t          fault_bits;
+/* dyno_load_task: PID on ACS ch0 (I_load) driving a load-ESC PWM.
+ *   active / i_target_mA  : operator inputs (Live Watch or dyno_sweep_task).
+ *   i_filt_mA / err_mA / pwm_us / tick : per-tick mirror by dyno_load_task. */
+typedef struct {
+    bool      active;
+    int32_t   i_target_mA;
+    int32_t   i_filt_mA;
+    int32_t   err_mA;
+    uint16_t  pwm_us;
+    uint32_t  tick;
+} pt_dyno_load_t;
 
-    /* Operator writes req_pct_x100; supervisor pushes to TIM1_CH1 each tick. */
-    uint16_t          engine_throttle_req_pct_x100; /* 0..10000 */
-    uint16_t          engine_throttle_pct_x100;
-    uint16_t          engine_throttle_pulse_us;
-    uint32_t          engine_throttle_tick;
+/* Contactor commands: supervisor sets, pdb_task mirrors to GPIOs. */
+typedef struct {
+    bool  battery;
+    bool  rectifier;
+} pt_contactor_cmd_t;
 
-    /* ACS772ECB-300B on ADS1262 AIN0/1/2; signed mA. */
-    int32_t           current_sensor_mA[3];
-    uint32_t          current_sensor_tick;
-
-    /* 3x MAX31855 thermocouples on hspi2, whole C, signed. */
-    int16_t           tc_C[3];
-    bool              tc_valid[3];
-    uint32_t          tc_input_tick;
-
-    /* From rtos_stats_task; idle-counter derived. */
-    uint8_t           cpu_load_pct;
-    uint32_t          cpu_load_tick;
-
-    /* Experiment runner state; label points into static profile data. */
-    bool              expt_active;
-    uint8_t           expt_phase_idx;
-    const char       *expt_label;
-    bool              expt_advance_req;
-    bool              expt_abort_req;
-    bool              expt_start_req;
-
-    /* dyno_load_task (bench): PID on ACS ch0 (I_load) -> load ESC PWM. */
-    bool              dyno_load_active;
-    int32_t           dyno_load_i_target_mA;
-    int32_t           dyno_load_i_filt_mA;
-    int32_t           dyno_load_err_mA;
-    uint16_t          dyno_load_pwm_us;
-    uint32_t          dyno_load_tick;
+/* === Aggregate ===
+ *
+ * Top-level state. Locked by g_pt_mtx (priority-inherited, static-allocated;
+ * see pt_init). All cross-task access must go through pt_* helpers. */
+typedef struct {
+    pt_rect_cmd_t          rect_cmd;
+    pt_rect_telem_t        rect;
+    pt_fc_t                fc;
+    pt_ecu_t               ecu;
+    pt_engine_state_t      engine;
+    pt_engine_throttle_t   engine_throttle;
+    pt_ctl_telem_t         ctl;
+    pt_acs_t               acs;
+    pt_tc_t                tc;
+    pt_cpu_t               cpu;
+    pt_expt_t              expt;
+    pt_dyno_load_t         dyno_load;
+    pt_contactor_cmd_t     contactor_cmd;
+    volatile uint32_t      supervisor_heartbeat;  /* TODO: convert to _Atomic in follow-up PR */
+    uint16_t               fault_bits;
 } powertrain_state_t;
 
 
