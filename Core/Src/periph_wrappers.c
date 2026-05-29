@@ -37,6 +37,12 @@ void can_hw_diag_snapshot(void) {
     g_can1_ewgf = (uint8_t)( esr        & 0x01);
 }
 
+bool can_hw_is_busoff(can_bus_t bus) {
+    CAN_HandleTypeDef *h = handle_of(bus);
+    if (h == 0) return false;
+    return (h->Instance->ESR & CAN_ESR_BOFF) != 0u;
+}
+
 void can_hw_init(can_bus_t bus) {
     CAN_HandleTypeDef *h = handle_of(bus);
     /* Filters added by can_hw_add_filter. */

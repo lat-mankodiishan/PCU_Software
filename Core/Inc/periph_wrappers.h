@@ -40,6 +40,10 @@ void led_hw_toggle(void);
 /* DEBUG: CAN1 ESR/TEC/REC into globals. */
 void can_hw_diag_snapshot(void);
 
+/* True while bxCAN reports bus-off (ESR.BOFF). Auto-recovery is enabled, so
+ * this clears once the controller successfully sees 11-bit recessive sequences. */
+bool can_hw_is_busoff(can_bus_t bus);
+
 /* ---- ESC PWM on TIM1 (1 us/tick, 20 ms period). ---- */
 typedef enum {
     ESC_CH_ENGINE = 0,    /* TIM1_CH1 PA8  engine 1100..1900 us */

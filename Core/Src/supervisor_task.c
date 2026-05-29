@@ -23,6 +23,53 @@
 #define RUN_DUTY_X10000          7500      /* 75.00 % fixed FOC duty in RUN */
 #define RUN_THROTTLE_PCT_X100    5000      /* 50.00 % fixed engine throttle in RUN */
 
+/* Fault detection thresholds (supervisor-owned faults). */
+#define FC_THROTTLE_STALE_MS         500u
+#define CURRENT_SENSOR_STALE_MS      500u
+#define RECT_OVERTEMP_C              85
+#define BUS_UNDERVOLT_CV             4000u   /* 40.00 V — TUNE FOR BATTERY */
+#define BUS_OVERVOLT_CV              6000u   /* 60.00 V — TUNE FOR BATTERY */
+#define ENGINE_STALL_MIN_RPM         1500u
+#define ENGINE_STALL_MS              2000u
+
+/* Per-bit severity policy. Sorted by bit index 0..15. */
+typedef enum {
+    SEV_NONE        = 0,
+    SEV_WARN        = 1,
+    SEV_DEGRADE     = 2,
+    SEV_FORCE_OFF   = 3,
+    SEV_FORCE_FAULT = 4,
+} fault_severity_t;
+
+static const uint8_t s_fault_severity[16] = {
+    [0]  = SEV_DEGRADE,      /* FAULT_RECT_STALE */
+    [1]  = SEV_FORCE_FAULT,  /* FAULT_RECT_OFFLINE */
+    [2]  = SEV_FORCE_OFF,    /* FAULT_FC_STALE */
+    [3]  = SEV_FORCE_FAULT,  /* FAULT_BUS1_BUSOFF */
+    [4]  = SEV_FORCE_FAULT,  /* FAULT_BUS2_BUSOFF */
+    [5]  = SEV_FORCE_FAULT,  /* FAULT_SUPERVISOR_HANG */
+    [6]  = SEV_NONE,         /* reserved */
+    [7]  = SEV_WARN,         /* FAULT_ECU_STALE */
+    [8]  = SEV_FORCE_OFF,    /* FAULT_FC_THROTTLE_STALE */
+    [9]  = SEV_FORCE_OFF,    /* FAULT_CURRENT_SENSOR_STALE */
+    [10] = SEV_WARN,         /* FAULT_TC_FAULT */
+    [11] = SEV_FORCE_OFF,    /* FAULT_ENGINE_STALL */
+    [12] = SEV_FORCE_OFF,    /* FAULT_ENGINE_OVERTEMP */
+    [13] = SEV_FORCE_OFF,    /* FAULT_RECT_OVERTEMP */
+    [14] = SEV_FORCE_OFF,    /* FAULT_BUS_UNDERVOLT */
+    [15] = SEV_FORCE_FAULT,  /* FAULT_BUS_OVERVOLT */
+};
+
+static fault_severity_t worst_severity(uint16_t f) {
+    fault_severity_t worst = SEV_NONE;
+    for (uint8_t i = 0; i < 16; i++) {
+        if ((f & (1u << i)) && s_fault_severity[i] > worst) {
+            worst = (fault_severity_t)s_fault_severity[i];
+        }
+    }
+    return worst;
+}
+
 /* GPIO switch fires CRANK->RUN edge; same PA7 as expt button (mutually
  * exclusive contexts — expt_active gates supervisor out of the wire). */
 #define ENGINE_RUN_SWITCH_PORT   GPIOA
@@ -177,6 +224,58 @@ static void run_fixed_setpoint(void) {
 }
 #endif
 
+/* Detect supervisor-owned faults: stale ticks + range checks + CAN bus-off.
+ * Per-task faults (RECT_STALE/OFFLINE, FC_STALE, ECU_STALE, SUPERVISOR_HANG,
+ * TC_FAULT, ENGINE_OVERTEMP) are raised in their owning tasks. */
+static void detect_faults(uint32_t now, engine_state_t engine_state) {
+    uint32_t fc_tick, acs_tick, rect_tick;
+    uint16_t v_dc_cV;
+    int16_t  igbt_temp_C;
+    uint16_t ecu_rpm;
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    fc_tick     = g_pt.fc.tick;
+    acs_tick    = g_pt.acs.tick;
+    rect_tick   = g_pt.rect.tick;
+    v_dc_cV     = g_pt.rect.state.V_dc_cV;
+    igbt_temp_C = g_pt.rect.state.igbt_temp_C;
+    ecu_rpm     = g_pt.ecu.rpm;
+    osMutexRelease(g_pt_mtx);
+
+    /* FC throttle staleness — distinct from NodeStatus stale. */
+    if (fc_tick && (now - fc_tick) > FC_THROTTLE_STALE_MS) pt_set_fault(FAULT_FC_THROTTLE_STALE);
+    else if (fc_tick)                                      pt_clear_fault(FAULT_FC_THROTTLE_STALE);
+
+    /* Current sensor staleness. */
+    if (acs_tick && (now - acs_tick) > CURRENT_SENSOR_STALE_MS) pt_set_fault(FAULT_CURRENT_SENSOR_STALE);
+    else if (acs_tick)                                          pt_clear_fault(FAULT_CURRENT_SENSOR_STALE);
+
+    /* Bus over/under volt and rect overtemp only checked when rect data fresh. */
+    if (rect_tick && (now - rect_tick) < 500u) {
+        if (v_dc_cV > BUS_OVERVOLT_CV)  pt_set_fault(FAULT_BUS_OVERVOLT);
+        else                            pt_clear_fault(FAULT_BUS_OVERVOLT);
+        if (v_dc_cV < BUS_UNDERVOLT_CV) pt_set_fault(FAULT_BUS_UNDERVOLT);
+        else                            pt_clear_fault(FAULT_BUS_UNDERVOLT);
+        if (igbt_temp_C > RECT_OVERTEMP_C) pt_set_fault(FAULT_RECT_OVERTEMP);
+        else                                pt_clear_fault(FAULT_RECT_OVERTEMP);
+    }
+
+    /* Engine stall — sustained low RPM while in RUN. */
+    static uint32_t s_low_rpm_first = 0u;
+    if (engine_state == ENGINE_RUN && ecu_rpm < ENGINE_STALL_MIN_RPM) {
+        if (s_low_rpm_first == 0u) s_low_rpm_first = now;
+        if ((now - s_low_rpm_first) > ENGINE_STALL_MS) pt_set_fault(FAULT_ENGINE_STALL);
+    } else {
+        s_low_rpm_first = 0u;
+        pt_clear_fault(FAULT_ENGINE_STALL);
+    }
+
+    /* CAN bus-off — ESR.BOFF polled; auto-recovery clears it on its own. */
+    if (can_hw_is_busoff(CAN_BUS_DRONECAN)) pt_set_fault(FAULT_BUS1_BUSOFF);
+    else                                     pt_clear_fault(FAULT_BUS1_BUSOFF);
+    if (can_hw_is_busoff(CAN_BUS_ENGINE))   pt_set_fault(FAULT_BUS2_BUSOFF);
+    else                                     pt_clear_fault(FAULT_BUS2_BUSOFF);
+}
+
 static void supervisor_task(void *arg) {
     (void)arg;
     uint32_t next = osKernelGetTickCount();
@@ -195,6 +294,35 @@ static void supervisor_task(void *arg) {
         faults           = g_pt.fault_bits;
         expt_active      = g_pt.expt.active;
         osMutexRelease(g_pt_mtx);
+
+        /* Detect supervisor-owned faults, then re-read fault_bits and apply policy. */
+        detect_faults(now, engine_state);
+        osMutexAcquire(g_pt_mtx, osWaitForever);
+        faults = g_pt.fault_bits;
+        osMutexRelease(g_pt_mtx);
+        const fault_severity_t sev = worst_severity(faults);
+
+        /* Fault policy enforcement — must run before request handling so a
+         * FORCE_OFF / FORCE_FAULT supersedes any pending CRANK/RUN request. */
+        if (sev == SEV_FORCE_FAULT && engine_state != ENGINE_FAULT) {
+            s_swap_phase = SWAP_IDLE;
+            pt_set_engine_state(ENGINE_FAULT);
+            engine_state = ENGINE_FAULT;
+            osMutexAcquire(g_pt_mtx, osWaitForever);
+            g_pt.engine.req = ENGINE_STATE_REQ_NONE;
+            osMutexRelease(g_pt_mtx);
+            engine_state_req = ENGINE_STATE_REQ_NONE;
+        } else if (sev == SEV_FORCE_OFF
+                   && engine_state != ENGINE_OFF
+                   && engine_state != ENGINE_FAULT) {
+            s_swap_phase = SWAP_IDLE;
+            pt_set_engine_state(ENGINE_OFF);
+            engine_state = ENGINE_OFF;
+            osMutexAcquire(g_pt_mtx, osWaitForever);
+            g_pt.engine.req = ENGINE_STATE_REQ_NONE;
+            osMutexRelease(g_pt_mtx);
+            engine_state_req = ENGINE_STATE_REQ_NONE;
+        }
 
         /* External request: RUN goes via swap (CRANK only); others apply direct. */
         if (engine_state_req != ENGINE_STATE_REQ_NONE
@@ -218,8 +346,7 @@ static void supervisor_task(void *arg) {
             osMutexRelease(g_pt_mtx);
         }
 
-        const bool hard_fault =
-            (faults & (FAULT_RECT_OFFLINE | FAULT_BUS2_BUSOFF)) != 0u;
+        const bool degrade = (sev >= SEV_DEGRADE);
         const bool switch_now =
             HAL_GPIO_ReadPin(ENGINE_RUN_SWITCH_PORT, ENGINE_RUN_SWITCH_PIN)
             == GPIO_PIN_SET;
@@ -256,7 +383,7 @@ static void supervisor_task(void *arg) {
         /* ---- Dispatch ---- */
         if (expt_active) {
             /* expt_run() owns the wire (bench mode); supervisor steps aside. */
-        } else if (hard_fault) {
+        } else if (degrade) {
             safe_idle();
         } else if (swap_step(now)) {
             /* swap drove the wire this tick. */
@@ -285,12 +412,12 @@ static void supervisor_task(void *arg) {
             }
         }
 
-        /* Contactor policy: battery stays closed except in ENGINE_FAULT;
-         * rectifier opens additionally on RECT_OFFLINE / BUS2_BUSOFF.
-         * PDB precharge AND-gate gates these GPIOs upstream — LOW = open. */
+        /* Contactor policy: battery opens only on ENGINE_FAULT (covers FORCE_FAULT
+         * severity since policy already sets state to ENGINE_FAULT). Rectifier
+         * additionally opens on any DEGRADE-or-worse severity. */
         const bool engine_fault = (engine_state == ENGINE_FAULT);
         const bool batt_close   = !engine_fault;
-        const bool rect_close   = !engine_fault && !hard_fault;
+        const bool rect_close   = !engine_fault && !degrade;
         pt_set_contactor_cmds(batt_close, rect_close);
 
         /* Mirror engine_throttle_req -> PWM. In RUN, V1 wrote req; elsewhere

@@ -9,7 +9,8 @@
 
 #define RECT_PERIOD_MS         5            /* 200 Hz */
 #define RECT_RX_QUEUE_DEPTH    8
-#define RECT_STALE_MS          200
+#define RECT_STALE_MS          200          /* DEGRADE on brief silence */
+#define RECT_OFFLINE_MS       2000          /* FORCE_FAULT after sustained absence */
 
 static StaticTask_t       s_tcb;
 static StackType_t        s_stack[256];     /* 1 KB */
@@ -88,7 +89,7 @@ static void rectifier_task(void *arg) {
                 g_pt.rect.state = s;
                 g_pt.rect.tick  = osKernelGetTickCount();
                 osMutexRelease(g_pt_mtx);
-                pt_clear_fault(FAULT_RECT_STALE);
+                pt_clear_fault(FAULT_RECT_STALE | FAULT_RECT_OFFLINE);
             } else if (f.id == VESC_ID_GET_RECT_STATE_EXTENDED) {
                 vesc_rect_state_ext_t e;
                 if (vesc_proto_decode_rect_state_extended(&f, &e) != VESC_DECODE_OK)
@@ -177,8 +178,11 @@ static void rectifier_task(void *arg) {
         osMutexAcquire(g_pt_mtx, osWaitForever);
         uint32_t last = g_pt.rect.tick;
         osMutexRelease(g_pt_mtx);
-        if (last && (osKernelGetTickCount() - last) > RECT_STALE_MS) {
-            pt_set_fault(FAULT_RECT_STALE);
+        if (last) {
+            uint32_t age = osKernelGetTickCount() - last;
+            if (age > RECT_STALE_MS)   pt_set_fault(FAULT_RECT_STALE);
+            if (age > RECT_OFFLINE_MS) pt_set_fault(FAULT_RECT_OFFLINE);
+            /* Cleared on successful RX above. */
         }
 
         next += RECT_PERIOD_MS;

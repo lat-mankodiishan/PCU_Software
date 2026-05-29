@@ -7,7 +7,8 @@
 #include "semphr.h"
 #include <string.h>
 
-#define SENSOR_PERIOD_MS   200       /* 1 Hz */
+#define SENSOR_PERIOD_MS              200      /* 5 Hz */
+#define FAULT_ENGINE_OVERTEMP_C       220      /* any cyl TC over this -> fault */
 
 static StaticTask_t      s_tcb;
 static StackType_t       s_stack[384];        /* 1.5 KB */
@@ -100,14 +101,23 @@ static void sensor_task(void *arg) {
             osMutexRelease(s_mtx);
         }
 
-        /* Mirror TC readings into g_pt. */
+        /* Mirror TC readings into g_pt + derive TC_FAULT and ENGINE_OVERTEMP. */
+        bool any_invalid = false;
+        bool any_overtemp = false;
         osMutexAcquire(g_pt_mtx, osWaitForever);
         for (uint8_t i = 0; i < SENSOR_NUM_TC && i < 3; ++i) {
             g_pt.tc.C[i]     = (int16_t)s_data.tc[i].tc_temp;
             g_pt.tc.valid[i] = s_data.tc_valid[i];
+            if (!s_data.tc_valid[i])                                   any_invalid  = true;
+            else if (s_data.tc[i].tc_temp > FAULT_ENGINE_OVERTEMP_C)   any_overtemp = true;
         }
         g_pt.tc.tick = osKernelGetTickCount();
         osMutexRelease(g_pt_mtx);
+
+        if (any_invalid)  pt_set_fault(FAULT_TC_FAULT);
+        else              pt_clear_fault(FAULT_TC_FAULT);
+        if (any_overtemp) pt_set_fault(FAULT_ENGINE_OVERTEMP);
+        else              pt_clear_fault(FAULT_ENGINE_OVERTEMP);
 
         osMutexAcquire(s_mtx, osWaitForever);
         s_data.tick = osKernelGetTickCount();

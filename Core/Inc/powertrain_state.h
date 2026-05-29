@@ -16,15 +16,23 @@
 #define ENGINE_THROTTLE_PULSE_MAX_US   2879u
 
 typedef enum {
-    FAULT_NONE             = 0u,
-    FAULT_RECT_STALE       = 1u <<  0,
-    FAULT_RECT_OFFLINE     = 1u <<  1,
-    FAULT_FC_STALE         = 1u <<  2,
-    FAULT_BUS1_BUSOFF      = 1u <<  3,
-    FAULT_BUS2_BUSOFF      = 1u <<  4,
-    FAULT_SUPERVISOR_HANG  = 1u <<  5,
+    FAULT_NONE                 = 0u,
+    FAULT_RECT_STALE           = 1u <<  0,   /* DEGRADE — VESC quiet > 200 ms */
+    FAULT_RECT_OFFLINE         = 1u <<  1,   /* FORCE_FAULT — VESC absent > 2 s */
+    FAULT_FC_STALE             = 1u <<  2,   /* FORCE_OFF — FC NodeStatus > 1 s */
+    FAULT_BUS1_BUSOFF          = 1u <<  3,   /* FORCE_FAULT — CAN1 in bus-off */
+    FAULT_BUS2_BUSOFF          = 1u <<  4,   /* FORCE_FAULT — CAN2 in bus-off */
+    FAULT_SUPERVISOR_HANG      = 1u <<  5,   /* FORCE_FAULT — heartbeat > 1 s */
     /* bit 6 reserved (was FAULT_BMS_STALE; BMS task disabled). */
-    FAULT_ECU_STALE        = 1u <<  7,
+    FAULT_ECU_STALE            = 1u <<  7,   /* WARN — ECU poll > 1 s */
+    FAULT_FC_THROTTLE_STALE    = 1u <<  8,   /* FORCE_OFF — RawCommand > 500 ms */
+    FAULT_CURRENT_SENSOR_STALE = 1u <<  9,   /* FORCE_OFF — ADS1262 > 500 ms */
+    FAULT_TC_FAULT             = 1u << 10,   /* WARN — any tc_valid[]==false */
+    FAULT_ENGINE_STALL         = 1u << 11,   /* FORCE_OFF — rpm low in RUN > 2 s */
+    FAULT_ENGINE_OVERTEMP      = 1u << 12,   /* FORCE_OFF — cyl TC > 220 °C */
+    FAULT_RECT_OVERTEMP        = 1u << 13,   /* FORCE_OFF — IGBT > 85 °C */
+    FAULT_BUS_UNDERVOLT        = 1u << 14,   /* FORCE_OFF — V_dc < 40 V */
+    FAULT_BUS_OVERVOLT         = 1u << 15,   /* FORCE_FAULT — V_dc > 60 V */
 } fault_id_t;
 
 /* Engine lifecycle; orthogonal to flight_mode_t. fc_link sets this from an RC
