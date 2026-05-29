@@ -15,18 +15,25 @@ local PERIOD_MS = 200   -- 5 Hz (match PCU FC_LINK_FLEX_PERIOD_MS)
 
 -- {flex_id, NAMED_VALUE_FLOAT name}
 local FIELDS = {
-    { 1,  "DUT" },  -- rect duty %
-    { 2,  "THR" },  -- engine throttle %
-    { 3,  "IRS" },  -- I_rect setpoint A
-    { 4,  "IRM" },  -- I_rect measured A
-    { 5,  "VDC" },  -- DC bus V
-    { 6,  "IBF" },  -- I_bat filtered A
-    { 7,  "IBR" },  -- I_bat reference A
-    { 8,  "RPM" },  -- generator RPM
-    { 9,  "IGT" },  -- IGBT temp C
-    { 10, "PRC" },  -- rect power W
+    { 1,  "DUT" },  -- rect duty %                 (controller-output mirror)
+    { 2,  "THR" },  -- engine throttle %           (applied)
+    { 3,  "IRS" },  -- I_rect setpoint A           (CURRENT mode only)
+    { 4,  "IRM" },  -- I_rect measured A           (VESC 0x201)
+    { 5,  "VDC" },  -- DC bus V                    (VESC 0x201)
+    { 6,  "IBF" },  -- I_bat filtered A            (V1)
+    { 7,  "IBR" },  -- I_bat reference A           (V1)
+    { 8,  "RPM" },  -- generator RPM               (VESC 0x201)
+    { 9,  "IGT" },  -- IGBT temp C                 (VESC 0x201)
+    { 10, "PRC" },  -- rect power W                (V1)
     { 11, "EST" },  -- engine state enum
     { 12, "FLT" },  -- fault bitfield
+    { 13, "ENG" },  -- ECU engine RPM
+    { 14, "TC0" },  -- MAX31855 thermocouple 0 (C)
+    { 15, "TC1" },  -- MAX31855 thermocouple 1 (C)
+    { 16, "AC2" },  -- ACS channel 2 current (A)
+    { 17, "AC1" },  -- ACS channel 1 current (A)
+    { 18, "DUA" },  -- actual VESC duty % (0x202)
+    { 19, "HB"  },  -- supervisor heartbeat counter
 }
 
 local last_us = {}      -- [flex_id] = last timestamp seen
