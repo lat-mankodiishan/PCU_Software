@@ -41,23 +41,27 @@ typedef enum {
     SEV_FORCE_FAULT = 4,
 } fault_severity_t;
 
+/* BENCH MODE: every fault demoted to WARN so detection runs (bits set in
+ * NodeStatus + visible in MP / Live Watch) but no action is taken. Restore
+ * per-bit severities below before flight. Intended-for-flight severity in the
+ * trailing comment of each line. */
 static const uint8_t s_fault_severity[16] = {
-    [0]  = SEV_DEGRADE,      /* FAULT_RECT_STALE */
-    [1]  = SEV_FORCE_FAULT,  /* FAULT_RECT_OFFLINE */
-    [2]  = SEV_FORCE_OFF,    /* FAULT_FC_STALE */
-    [3]  = SEV_FORCE_FAULT,  /* FAULT_BUS1_BUSOFF */
-    [4]  = SEV_FORCE_FAULT,  /* FAULT_BUS2_BUSOFF */
-    [5]  = SEV_FORCE_FAULT,  /* FAULT_SUPERVISOR_HANG */
+    [0]  = SEV_WARN,         /* FAULT_RECT_STALE            -> DEGRADE */
+    [1]  = SEV_WARN,         /* FAULT_RECT_OFFLINE          -> FORCE_FAULT */
+    [2]  = SEV_WARN,         /* FAULT_FC_STALE              -> FORCE_OFF */
+    [3]  = SEV_WARN,         /* FAULT_BUS1_BUSOFF           -> FORCE_FAULT */
+    [4]  = SEV_WARN,         /* FAULT_BUS2_BUSOFF           -> FORCE_FAULT */
+    [5]  = SEV_WARN,         /* FAULT_SUPERVISOR_HANG       -> FORCE_FAULT */
     [6]  = SEV_NONE,         /* reserved */
-    [7]  = SEV_WARN,         /* FAULT_ECU_STALE */
-    [8]  = SEV_FORCE_OFF,    /* FAULT_FC_THROTTLE_STALE */
-    [9]  = SEV_FORCE_OFF,    /* FAULT_CURRENT_SENSOR_STALE */
-    [10] = SEV_WARN,         /* FAULT_TC_FAULT */
-    [11] = SEV_FORCE_OFF,    /* FAULT_ENGINE_STALL */
-    [12] = SEV_FORCE_OFF,    /* FAULT_ENGINE_OVERTEMP */
-    [13] = SEV_FORCE_OFF,    /* FAULT_RECT_OVERTEMP */
-    [14] = SEV_FORCE_OFF,    /* FAULT_BUS_UNDERVOLT */
-    [15] = SEV_FORCE_FAULT,  /* FAULT_BUS_OVERVOLT */
+    [7]  = SEV_WARN,         /* FAULT_ECU_STALE             -> WARN (same) */
+    [8]  = SEV_WARN,         /* FAULT_FC_THROTTLE_STALE     -> FORCE_OFF */
+    [9]  = SEV_WARN,         /* FAULT_CURRENT_SENSOR_STALE  -> FORCE_OFF */
+    [10] = SEV_WARN,         /* FAULT_TC_FAULT              -> WARN (same) */
+    [11] = SEV_WARN,         /* FAULT_ENGINE_STALL          -> FORCE_OFF */
+    [12] = SEV_WARN,         /* FAULT_ENGINE_OVERTEMP       -> FORCE_OFF */
+    [13] = SEV_WARN,         /* FAULT_RECT_OVERTEMP         -> FORCE_OFF */
+    [14] = SEV_WARN,         /* FAULT_BUS_UNDERVOLT         -> FORCE_OFF */
+    [15] = SEV_WARN,         /* FAULT_BUS_OVERVOLT          -> FORCE_FAULT */
 };
 
 static fault_severity_t worst_severity(uint16_t f) {
