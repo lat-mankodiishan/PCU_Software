@@ -33,7 +33,6 @@
 #include "sensor_task.h"
 #include "log_task.h"
 #include "fc_link_task.h"
-#include "bms_task.h"
 #include "ecu_task.h"
 #include "dyno_sweep_task.h"
 #include "dyno_load_task.h"
@@ -183,7 +182,6 @@ void MX_FREERTOS_Init(void) {
   sensor_task_start();
   log_task_start();
   fc_link_task_start();
-  // bms_task_start();    /* Phase 1: no BMS connected — re-enable for Phase 3 */
   ecu_task_start();      /* Loweheiser ECU on USART2 (MegaSquirt 'A' poll) */
   rtos_stats_task_start();
   /* USER CODE END RTOS_THREADS */
