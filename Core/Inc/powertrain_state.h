@@ -79,10 +79,20 @@ typedef struct {
 } pt_fc_t;
 
 /* ECU mirror: ecu_task (Loweheiser UART2 DMA) -> log / fc_link.
- * CHT/EGT come from MAX31855 (pt_tc_t), not ECU. */
+ * Primary CHT/EGT come from MAX31855 (pt_tc_t); ECU fields are bookkeeping. */
 typedef struct {
     uint16_t  rpm;
     uint8_t   engine_status;               /* bit0 ready, 1 crank, 2 startw, 3 warmup */
+    uint16_t  seconds;                     /* since-boot counter, wraps at ~18 h */
+    int16_t   coolant_C_x10;               /* coolant/CHT, 0.1 °C */
+    int16_t   tps_pct_x10;                 /* throttle position, 0.1 % */
+    int16_t   afr1_x10;                    /* AFR cyl 1, 0.1 AFR */
+    int16_t   afr2_x10;                    /* AFR cyl 2, 0.1 AFR */
+    uint16_t  pwmin0;                      /* raw PWM-in ch 0 (timer counts) */
+    uint16_t  pwmin1;
+    uint16_t  pwmin2;
+    uint16_t  pwmin3;
+    uint8_t   rc_throttle;                 /* clamped 0..100 %, derived from tps */
     uint32_t  tick;
 } pt_ecu_t;
 

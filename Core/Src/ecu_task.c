@@ -38,12 +38,30 @@ typedef struct {
 typedef enum {
     ECU_F_RPM = 0,
     ECU_F_ENGINE_BYTE,
+    ECU_F_SECONDS,
+    ECU_F_COOLANT,
+    ECU_F_TPS,
+    ECU_F_AFR1,
+    ECU_F_AFR2,
+    ECU_F_PWMIN0,
+    ECU_F_PWMIN1,
+    ECU_F_PWMIN2,
+    ECU_F_PWMIN3,
     ECU_F_COUNT
 } ecu_field_id_t;
 
 static const ecu_field_t s_fields[ECU_F_COUNT] = {
-    [ECU_F_RPM]          = { "rpm",    6, ECU_FT_U16, 1.000f, 0.0f },
-    [ECU_F_ENGINE_BYTE]  = { "estat", 11, ECU_FT_U08, 1.000f, 0.0f }, /* bit0 ready, 1 crank, 2 startw, 3 warmup */
+    [ECU_F_RPM]          = { "rpm",       6, ECU_FT_U16, 1.0000f,    0.0f },
+    [ECU_F_ENGINE_BYTE]  = { "estat",    11, ECU_FT_U08, 1.0000f,    0.0f }, /* bit0 ready, 1 crank, 2 startw, 3 warmup */
+    [ECU_F_SECONDS]      = { "seconds",   0, ECU_FT_U16, 1.0000f,    0.0f },
+    [ECU_F_COOLANT]      = { "coolant",  22, ECU_FT_S16, 0.5555f, -3200.0f }, /* INI 0.05555*raw - 320 = °C; ×10 here for 0.1 °C */
+    [ECU_F_TPS]          = { "tps",      24, ECU_FT_S16, 1.0000f,    0.0f }, /* raw already in 0.1 % */
+    [ECU_F_AFR1]         = { "afr1",     28, ECU_FT_S16, 1.0000f,    0.0f }, /* raw already in 0.1 AFR */
+    [ECU_F_AFR2]         = { "afr2",     30, ECU_FT_S16, 1.0000f,    0.0f },
+    [ECU_F_PWMIN0]       = { "pwmin0",  120, ECU_FT_U16, 1.0000f,    0.0f }, /* raw PWM-in counts; one of 0..3 is the P11 throttle */
+    [ECU_F_PWMIN1]       = { "pwmin1",  122, ECU_FT_U16, 1.0000f,    0.0f },
+    [ECU_F_PWMIN2]       = { "pwmin2",  124, ECU_FT_U16, 1.0000f,    0.0f },
+    [ECU_F_PWMIN3]       = { "pwmin3",  126, ECU_FT_U16, 1.0000f,    0.0f },
 };
 
 static StaticTask_t s_tcb;
@@ -115,9 +133,23 @@ static void ecu_task(void *arg) {
                 eng[i] = decode_field(&s_fields[i], s_block);
             }
 
+            int16_t tps_x10 = (int16_t)eng[ECU_F_TPS];
+            if (tps_x10 < 0)    tps_x10 = 0;
+            if (tps_x10 > 1000) tps_x10 = 1000;
+
             osMutexAcquire(g_pt_mtx, osWaitForever);
             g_pt.ecu.rpm           = (uint16_t)eng[ECU_F_RPM];
             g_pt.ecu.engine_status = (uint8_t) eng[ECU_F_ENGINE_BYTE];
+            g_pt.ecu.seconds       = (uint16_t)eng[ECU_F_SECONDS];
+            g_pt.ecu.coolant_C_x10 = (int16_t) eng[ECU_F_COOLANT];
+            g_pt.ecu.tps_pct_x10   = (int16_t) eng[ECU_F_TPS];
+            g_pt.ecu.afr1_x10      = (int16_t) eng[ECU_F_AFR1];
+            g_pt.ecu.afr2_x10      = (int16_t) eng[ECU_F_AFR2];
+            g_pt.ecu.pwmin0        = (uint16_t)eng[ECU_F_PWMIN0];
+            g_pt.ecu.pwmin1        = (uint16_t)eng[ECU_F_PWMIN1];
+            g_pt.ecu.pwmin2        = (uint16_t)eng[ECU_F_PWMIN2];
+            g_pt.ecu.pwmin3        = (uint16_t)eng[ECU_F_PWMIN3];
+            g_pt.ecu.rc_throttle   = (uint8_t)(tps_x10 / 10);
             g_pt.ecu.tick          = osKernelGetTickCount();
             osMutexRelease(g_pt_mtx);
 
