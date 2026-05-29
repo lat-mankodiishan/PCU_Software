@@ -12,6 +12,7 @@
 
 /* Crank duty + CRANK->RUN motor-swap timings; copied from expt sweep profile. */
 #define CRANK_BLDC_DUTY_X10000   4200      /* 42.00 % */
+#define CRANK_THROTTLE_PCT_X100  4500      /* 45.00 % engine throttle while cranking */
 #define SWAP_BLEED_MS             300      /* BLDC I=0 before motor_type swap */
 #define SWAP_LOCK_MS             1000      /* FOC inverted I=0 observer lock */
 #define SWAP_PRIME_MS             500      /* open-loop hold before V1 takes over */
@@ -135,6 +136,9 @@ static void crank_hold(void) {
     pt_set_motor_type(VESC_MOTOR_TYPE_BLDC);
     pt_set_invert_direction(false);
     pt_set_setpoint_duty(CRANK_BLDC_DUTY_X10000, MODE_TAKEOFF);
+    osMutexAcquire(g_pt_mtx, osWaitForever);
+    g_pt.engine_throttle.req_pct_x100 = CRANK_THROTTLE_PCT_X100;
+    osMutexRelease(g_pt_mtx);
 }
 
 /* Returns true while a swap is in progress (it owns the wire this tick). */
