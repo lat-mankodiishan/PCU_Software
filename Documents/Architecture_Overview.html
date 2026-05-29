@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PCU firmware — architecture overview</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; max-width: 950px; margin: 2em auto; line-height: 1.45; color: #222; }
+  h1 { font-size: 1.8em; border-bottom: 2px solid #555; padding-bottom: 0.2em; }
+  h2 { font-size: 1.35em; border-bottom: 1px solid #aaa; padding-bottom: 0.15em; margin-top: 1.6em; }
+  h3 { font-size: 1.1em; margin-top: 1.3em; }
+  code { font-family: Consolas, "Courier New", monospace; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.95em; }
+  table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+  th, td { border: 1px solid #888; padding: 4px 8px; text-align: left; vertical-align: top; }
+  th { background: #e8e8e8; }
+  ul { margin: 0.4em 0; padding-left: 1.4em; }
+  ol { margin: 0.4em 0; padding-left: 1.4em; }
+  li { margin: 0.15em 0; }
+  pre { background: #f0f0f0; padding: 0.6em 0.8em; border-radius: 4px; overflow-x: auto; font-family: Consolas, "Courier New", monospace; font-size: 0.9em; line-height: 1.3; }
+  .small { color: #555; font-size: 0.9em; }
+</style>
+</head>
+<body>
+
+<h1>PCU firmware — top-down architecture overview</h1>
+
+<p><b>Role.</b> The PCU is the powertrain controller on a series-hybrid hexacopter. A Cube Orange+ Pixhawk runs stock ArduCopter; the PCU (STM32F405) owns: rectifier setpoint to a VESC-based active rectifier, engine throttle servo, ICE engine UART, battery + rectifier contactor sequencing, current + thermocouple sensing, DroneCAN link to the FC, and SD-card logging. State + control law live in the PCU; the FC just hands down throttle demand and engine_state requests.</p>
+
+<h2>1. Hardware topology</h2>
+
+<pre>
+        ┌──────────────────────────┐    CAN1 1 Mbps (DroneCAN)    ┌──────────────────────────┐
+        │  PCU  STM32F405RGT       │ ───────────────────────────► │  Cube Orange+ (node 10)  │
+        │  node 50                 │ ◄─── RawCommand, ArrayCmd,   │  ArduCopter 4.x stock    │
+        │                          │      param.GetSet, NodeStatus│  6× motors on CAN2/PWM   │
+        │                          │ ───► FlexDebug, NodeStatus   │  + GPS, Lua scripts      │
+        └──┬──┬──┬──┬──┬──┬──┬─────┘                              └──────────────────────────┘
+           │  │  │  │  │  │  │
+   CAN2 ───┘  │  │  │  │  │  │  250 kbps   ► VESC rectifier (0x101..0x105 cmd, 0x201/0x202 telem)
+   USART2 ────┘  │  │  │  │  │  115k 8N1   ► Loweheiser ECU (MegaSquirt 'A' poll, 212 B block)
+   SPI1 ─────────┘  │  │  │  │             ► SD card (FATFS), CS=PB6
+   SPI2 ────────────┘  │  │  │             ► 3× MAX31855 K-type thermocouples (separate CS lines)
+   SPI3 ───────────────┘  │  │             ► ADS1262 24-bit ADC (3× ACS772ECB-300B current sensors)
+   TIM1_CH1 PA8 ──────────┘  │             ► Engine throttle ESC PWM 1667..2879 µs @ 50 Hz
+   TIM1_CH3 PA10 ────────────┘             ► Load ESC PWM 1000..2000 µs (dyno bench only)
+
+   GPIOs:  PA7  engine-run bench switch (input)            PC3  precharge latch pulse (1 s at boot)
+           battery contactor cmd, rectifier contactor cmd  ADC_DRDY EXTI (ADS1262 data-ready IRQ)
+           LED heartbeat (toggled in idle hook)
+</pre>
+
+<h2>2. Clocks, peripherals, watchdog</h2>
+
+<table>
+  <tr><th>Item</th><th>Setting</th><th>Source</th></tr>
+  <tr><td>Source clock</td><td>HSI 16 MHz</td><td><span class="small">HSE crystal eventually preferred; HSI is on the edge of CAN timing budget at 1 Mbps</span></td></tr>
+  <tr><td>PLL</td><td>PLLM=8, PLLN=80, PLLP=2 → SYSCLK 40 MHz, HCLK 40 MHz</td><td><code>main.c::SystemClock_Config</code></td></tr>
+  <tr><td>APB1 / APB2</td><td>20 MHz / 20 MHz</td><td>CAN1 + CAN2 clock source</td></tr>
+  <tr><td>CAN1</td><td>1 Mbps, Prescaler=2, BS1=8 TQ, BS2=1 TQ, SJW=1, sample 90 %. <code>TransmitFifoPriority = ENABLE</code>. AutoBusOff + AutoRetransmission ENABLE.</td><td><code>can.c::MX_CAN1_Init</code></td></tr>
+  <tr><td>CAN2</td><td>250 kbps, Prescaler=8, BS1=8 TQ, BS2=1 TQ.</td><td><code>can.c::MX_CAN2_Init</code></td></tr>
+  <tr><td>USART2 (ECU)</td><td>115200 8N1, DMA RX. PA3 with <b>GPIO_PULLUP</b> (prevents floating-line FE/NE latch).</td><td><code>usart.c::MX_USART2_UART_Init</code> + MspInit override</td></tr>
+  <tr><td>SPI1 (SD)</td><td>FATFS_SD over SPI1. CS = PB6.</td><td><code>spi.c</code> + <code>fatfs.c</code></td></tr>
+  <tr><td>SPI2 (MAX31855)</td><td>3 thermocouples on hspi2; CS per channel via GPIO.</td><td><code>max31855.c</code></td></tr>
+  <tr><td>SPI3 (ADS1262)</td><td>24-bit ADC, DRDY EXTI on <code>ADC_DRDY_Pin</code>. Sinc4 filter, gain configured per-channel.</td><td><code>ads1262.c</code></td></tr>
+  <tr><td>TIM1 CH1</td><td>PA8, 1 µs tick, 20 ms period (50 Hz). 1667..2879 µs = 0..100 % engine throttle (5/3.3 scaled for 5 V PWM-as-DAC servo).</td><td><code>tim.c</code> + <code>periph_wrappers.c::esc_hw_*</code></td></tr>
+  <tr><td>TIM1 CH3</td><td>PA10, same timer, 1000..2000 µs for load ESC (dyno bench).</td><td>same</td></tr>
+  <tr><td>IWDG</td><td>PRESCALER_8, Reload=4095 → ~1.0 s timeout (LSI nominal 32 kHz / 8). 5× margin on 200 ms supervisor refresh.</td><td><code>iwdg.c::MX_IWDG_Init</code></td></tr>
+  <tr><td>FreeRTOS tick</td><td>SysTick. Tick hook decrements FATFS_SD Timer1/Timer2.</td><td><code>freertos.c::vApplicationTickHook</code></td></tr>
+</table>
+
+<h2>3. Boot order</h2>
+
+<ol>
+  <li><code>HAL_Init</code></li>
+  <li><code>SystemClock_Config</code></li>
+  <li>Peripheral <code>MX_*_Init</code>: GPIO, DMA, CAN1, CAN2, DAC, SPI1/2/3, TIM1, FATFS, IWDG, USART2.</li>
+  <li><code>__HAL_DBGMCU_FREEZE_CAN1/2</code> (DEBUG build only — pause CAN on breakpoint).</li>
+  <li><code>osKernelInitialize</code> → <code>MX_FREERTOS_Init</code>:
+    <ul>
+      <li><code>pt_init()</code> — zero <code>g_pt</code>, create priority-inherit mutex, park engine throttle at min pulse.</li>
+      <li><code>can_mgr_init()</code> — TX/RX queues, dispatch task, CAN ISRs armed.</li>
+      <li>Tasks created (order in table below).</li>
+    </ul>
+  </li>
+  <li><code>osKernelStart</code> — never returns. defaultTask pulses PC3 high for 1 s then idles forever.</li>
+</ol>
+
+<h2>4. FreeRTOS tasks</h2>
+
+<table>
+  <tr><th>Task</th><th>Prio</th><th>Stack</th><th>Period / trigger</th><th>Role</th></tr>
+  <tr><td><code>supervisor</code></td><td>High (5)</td><td>1 KB</td><td>200 ms (5 Hz)</td><td>State machine, fault policy, contactor cmds, engine throttle mirror, heartbeat, watchdog kick.</td></tr>
+  <tr><td><code>rectifier</code></td><td>AboveNormal (4)</td><td>1 KB</td><td>5 ms (200 Hz)</td><td>VESC link on CAN2. RX 0x201 (concise) + 0x202 (extended) → <code>g_pt.rect.*</code>. TX 0x101/0x102/0x103 by ctrl_mode + 0x104 motor_type + 0x105 invert_dir (on-change + 1 s keep-alive).</td></tr>
+  <tr><td><code>pdb</code></td><td>AboveNormal (4)</td><td>1 KB</td><td>20 ms (50 Hz)</td><td>Watches <code>supervisor_heartbeat</code>; raises <code>FAULT_SUPERVISOR_HANG</code> after 1 s stale. While supervisor alive, mirrors <code>g_pt.contactor_cmd</code> to GPIO via <code>pdb_hw_write</code>. Hold-last-state when supervisor hangs (never opens contactors mid-flight from this task).</td></tr>
+  <tr><td><code>sensor</code></td><td>Normal (3)</td><td>1.5 KB</td><td>200 ms (5 Hz)</td><td>ADS1262 scan on DRDY → <code>g_pt.acs.mA[3]</code>. 3× MAX31855 read → <code>g_pt.tc.C[3]/valid[3]</code>. Raises <code>FAULT_TC_FAULT</code> on any invalid, <code>FAULT_ENGINE_OVERTEMP</code> if any TC &gt; 220 °C.</td></tr>
+  <tr><td><code>log</code></td><td>Low (2)</td><td>2 KB</td><td>100 ms (10 Hz)</td><td>FATFS mount, picks <code>LOGNNNN.CSV</code>. Snapshots <code>g_pt</code> + <code>sensor_data</code>, writes one CSV row, <code>f_sync</code> every 10 writes.</td></tr>
+  <tr><td><code>fc_link</code></td><td>AboveNormal (4)</td><td>2 KB</td><td>50 ms (20 Hz)</td><td>Owns libcanard on CAN1. RX RawCommand / ArrayCommand / NodeStatus / GetNodeInfo / param.GetSet. TX NodeStatus 1 Hz + FlexDebug 19 fields 5 Hz. Raises/clears <code>FAULT_FC_STALE</code> on NodeStatus aging.</td></tr>
+  <tr><td><code>ecu</code></td><td>Normal (3)</td><td>1.5 KB</td><td>100 ms (10 Hz)</td><td>USART2 MegaSquirt 'A' poll → 212-byte block. Decodes rpm, estat, seconds, coolant, tps, afr1/2, pwmin0..3 → <code>g_pt.ecu.*</code>. Raises <code>FAULT_ECU_STALE</code> after 1 s without successful poll.</td></tr>
+  <tr><td><code>can_disp</code></td><td>AboveNormal (4)</td><td>2 KB</td><td>1 ms poll</td><td>Walks per-bus RX queues, matches against subscribers, posts to subscriber-owned queues. Polling for now (TODO: thread-flag from ISR).</td></tr>
+  <tr><td><code>dyno_sweep</code></td><td>—</td><td>—</td><td>bench</td><td>Started but bench-only; cooperates via <code>g_pt.expt.*</code> flags. Supervisor steps aside while <code>expt.active</code> is true.</td></tr>
+  <tr><td><code>rtos_stats</code></td><td>Low (2)</td><td>2 KB</td><td>5 s</td><td>DWT CYCCNT-backed FreeRTOS run-time stats. Dumps per-task CPU % + stack HWM to SWO, writes load% to <code>g_pt.cpu</code>.</td></tr>
+  <tr><td><code>defaultTask</code></td><td>Normal (3)</td><td>~0.5 KB</td><td>boot one-shot</td><td>PC3 high 1 s → low (contactor precharge latch / startup pulse), then idle forever.</td></tr>
+  <tr><td><span class="small"><code>IDLE</code> hook</span></td><td>—</td><td>—</td><td>—</td><td>500 ms LED toggle (proves idle isn't starved).</td></tr>
+</table>
+
+<p><b>Hooks:</b> <code>vApplicationStackOverflowHook</code> halts in <code>Error_Handler</code>; <code>vApplicationMallocFailedHook</code> same. <code>configUSE_TICK_HOOK=1</code> drives FATFS_SD timeouts.</p>
+
+<h2>5. Shared state — g_pt</h2>
+
+<p>Single struct, single priority-inherit mutex (<code>g_pt_mtx</code>). Cross-task access goes through <code>pt_*</code> helpers in <code>powertrain_state.c</code> wherever possible; direct reads/writes use the mutex inline. <b>13 sub-structs + 2 top-level fields:</b></p>
+
+<table>
+  <tr><th>Sub-struct</th><th>Producer</th><th>Main consumers</th></tr>
+  <tr><td><code>rect_cmd</code></td><td>supervisor, experiment</td><td>rectifier_task (every tick)</td></tr>
+  <tr><td><code>rect</code> (telem incl. state + state_ext)</td><td>rectifier_task</td><td>supervisor (V1 inputs + fault detection), log, fc_link (FlexDebug)</td></tr>
+  <tr><td><code>fc</code></td><td>fc_link_task (RawCommand)</td><td>supervisor (throttle dem), log</td></tr>
+  <tr><td><code>ecu</code></td><td>ecu_task</td><td>supervisor (stall detect), log, fc_link (FlexDebug ENG)</td></tr>
+  <tr><td><code>engine</code> (state + req)</td><td>supervisor (state), fc_link/Live Watch (req)</td><td>supervisor dispatch, log, fc_link (FlexDebug EST)</td></tr>
+  <tr><td><code>engine_throttle</code></td><td>supervisor (req); pt_set_engine_throttle_pct_x100 (applied)</td><td>TIM1_CH1 PWM via setter, log, fc_link (FlexDebug THR)</td></tr>
+  <tr><td><code>ctl</code> (V1 telemetry mirror)</td><td>supervisor (run_v1 / run_fixed_setpoint)</td><td>log, fc_link (FlexDebug DUT/IBF/IBR/PRC)</td></tr>
+  <tr><td><code>acs</code></td><td>sensor_task</td><td>supervisor (V1 input + stale fault), log, fc_link (AC1/AC2)</td></tr>
+  <tr><td><code>tc</code></td><td>sensor_task</td><td>supervisor (overtemp fault), log, fc_link (TC0/TC1)</td></tr>
+  <tr><td><code>cpu</code></td><td>rtos_stats_task</td><td>log</td></tr>
+  <tr><td><code>expt</code></td><td>experiment + dyno tasks</td><td>supervisor (steps aside), log</td></tr>
+  <tr><td><code>dyno_load</code></td><td>dyno_load_task</td><td>log, dyno_sweep</td></tr>
+  <tr><td><code>contactor_cmd</code></td><td>supervisor</td><td>pdb_task → GPIO</td></tr>
+  <tr><td><code>supervisor_heartbeat</code> (top-level)</td><td>supervisor (every tick)</td><td>pdb_task (watchdog), fc_link (FlexDebug HB)</td></tr>
+  <tr><td><code>fault_bits</code> (top-level uint16)</td><td>multiple (pt_set_fault / pt_clear_fault)</td><td>supervisor (policy), fc_link (NodeStatus vendor_status + FLT)</td></tr>
+</table>
+
+<h2>6. External link summary</h2>
+
+<table>
+  <tr><th>Link</th><th>Direction</th><th>Protocol / DTID</th><th>Rate</th><th>Purpose</th></tr>
+  <tr><td>CAN1</td><td>FC → PCU</td><td><code>esc.RawCommand</code> (1030)</td><td>FC rate</td><td>Throttle feedforward (average of 6 motor channels, motor-arming-gated)</td></tr>
+  <tr><td>CAN1</td><td>FC → PCU</td><td><code>actuator.ArrayCommand</code> (1010)</td><td>Lua 10 Hz</td><td>Engine state command (actuator_id=8), NOT motor-arming-gated</td></tr>
+  <tr><td>CAN1</td><td>FC → PCU</td><td><code>NodeStatus</code> (341)</td><td>~1 Hz</td><td>FC heartbeat → clears FAULT_FC_STALE</td></tr>
+  <tr><td>CAN1</td><td>GCS → PCU</td><td><code>param.GetSet</code> (11)</td><td>on demand</td><td>flight_state (idx 0), engine_state (idx 1)</td></tr>
+  <tr><td>CAN1</td><td>GCS → PCU</td><td><code>GetNodeInfo</code> (1)</td><td>on demand</td><td>Node discovery</td></tr>
+  <tr><td>CAN1</td><td>PCU → all</td><td><code>NodeStatus</code> (341)</td><td>1 Hz</td><td>uptime, fault_bits in vendor_status_code</td></tr>
+  <tr><td>CAN1</td><td>PCU → all</td><td><code>dronecan.FlexDebug</code> (16371)</td><td>5 Hz × 19 IDs</td><td>Telemetry, bridged to MAVLink NAMED_VALUE_FLOAT by Lua</td></tr>
+  <tr><td>CAN2</td><td>PCU → VESC</td><td>0x101 curr / 0x102 omega / 0x103 duty</td><td>200 Hz (one per tick by mode)</td><td>Rectifier setpoint</td></tr>
+  <tr><td>CAN2</td><td>PCU → VESC</td><td>0x104 motor_type / 0x105 invert_dir</td><td>on-change + 1 s keep-alive</td><td>BLDC↔FOC swap, direction</td></tr>
+  <tr><td>CAN2</td><td>VESC → PCU</td><td>0x201 concise / 0x202 extended (CRC)</td><td>VESC rate</td><td>V_dc, I_dc, gen_rpm, IGBT temp / duty_actual, Iq, Id, run_state</td></tr>
+  <tr><td>USART2</td><td>PCU ↔ ECU</td><td>MegaSquirt 'A' poll, 212-byte ochBlock</td><td>10 Hz</td><td>RPM, estat, coolant, TPS, AFR, PWMin0..3</td></tr>
+  <tr><td>SPI1</td><td>PCU ↔ SD</td><td>FATFS</td><td>10 Hz write, 1 Hz sync</td><td>CSV log</td></tr>
+  <tr><td>SPI2</td><td>PCU ← TC</td><td>MAX31855 raw 32-bit</td><td>5 Hz × 3</td><td>K-type thermocouple temps</td></tr>
+  <tr><td>SPI3</td><td>PCU ← ADC</td><td>ADS1262 24-bit signed</td><td>5 Hz scan / DRDY</td><td>3× ACS772 current channels</td></tr>
+  <tr><td>PWM PA8</td><td>PCU → engine</td><td>50 Hz, 1667–2879 µs</td><td>every supervisor tick</td><td>Engine throttle servo</td></tr>
+  <tr><td>PWM PA10</td><td>PCU → load ESC</td><td>50 Hz, 1000–2000 µs</td><td>dyno_load_task</td><td>Bench load fan</td></tr>
+  <tr><td>GPIO PA7</td><td>switch → PCU</td><td>edge-detected</td><td>polled in supervisor</td><td>Bench CRANK→RUN trigger (legacy, still wired)</td></tr>
+  <tr><td>GPIO PC3</td><td>PCU → PDB</td><td>1-shot pulse</td><td>at boot</td><td>Precharge latch high for 1 s</td></tr>
+  <tr><td>GPIO contactors</td><td>PCU → PDB</td><td>level</td><td>pdb_task 50 Hz</td><td>Battery + rectifier contactor cmds</td></tr>
+</table>
+
+<h2>7. Engine state machine — supervisor</h2>
+
+<pre>
+   ENGINE_OFF      safe_idle()                  duty=0, throttle=0
+       │                                        contactors: batt closed, rect closed
+       │  pt_request_engine_state(CRANK) via param.GetSet or RC switch
+       ▼
+   ENGINE_CRANK    crank_hold()                 BLDC, duty=42%, throttle=45%
+       │                                        contactors: same
+       │  pt_request_engine_state(RUN) OR PA7 rising edge
+       ▼
+   (swap)          SWAP_BLEED  300 ms           BLDC, duty=0
+                   ──(motor swap)──             BLDC→FOC inv
+                   SWAP_LOCK   1000 ms          FOC inv, duty=0
+                   SWAP_PRIME   500 ms          FOC inv, duty=60%, throttle=60%
+       │
+       ▼
+   ENGINE_RUN      run_fixed_setpoint()         duty=75%, throttle=50%   (current: V1 disabled)
+                   run_v1() when RUN_USE_V1_CONTROLLER=1
+
+   FAULT (any time) → SEV_FORCE_FAULT path → ENGINE_FAULT, batt + rect contactors open
+   FAULT (any time) → SEV_FORCE_OFF   path → ENGINE_OFF, swap aborted
+</pre>
+
+<p>Pre-flight gate (<code>pt_preflight_ok</code> in <code>powertrain_state.c</code>) rejects CRANK/RUN requests unless VESC + FC alive and no critical faults set. OFF/FAULT always accepted.</p>
+
+<h2>8. Fault map (current bits and owners)</h2>
+
+<table>
+  <tr><th>Bit</th><th>Name</th><th>Raised by</th><th>Condition</th></tr>
+  <tr><td>0</td><td><code>FAULT_RECT_STALE</code></td><td>rectifier_task</td><td>VESC 0x201 quiet &gt; 200 ms</td></tr>
+  <tr><td>1</td><td><code>FAULT_RECT_OFFLINE</code></td><td>rectifier_task</td><td>VESC 0x201 quiet &gt; 2 s</td></tr>
+  <tr><td>2</td><td><code>FAULT_FC_STALE</code></td><td>fc_link_task</td><td>FC NodeStatus stale &gt; 1 s</td></tr>
+  <tr><td>3</td><td><code>FAULT_BUS1_BUSOFF</code></td><td>supervisor.detect_faults</td><td>CAN1 ESR.BOFF</td></tr>
+  <tr><td>4</td><td><code>FAULT_BUS2_BUSOFF</code></td><td>supervisor.detect_faults</td><td>CAN2 ESR.BOFF</td></tr>
+  <tr><td>5</td><td><code>FAULT_SUPERVISOR_HANG</code></td><td>pdb_task</td><td>supervisor_heartbeat unchanged &gt; 1 s</td></tr>
+  <tr><td>6</td><td>(reserved)</td><td>—</td><td>was FAULT_BMS_STALE</td></tr>
+  <tr><td>7</td><td><code>FAULT_ECU_STALE</code></td><td>ecu_task</td><td>No successful poll &gt; 1 s</td></tr>
+  <tr><td>8</td><td><code>FAULT_FC_THROTTLE_STALE</code></td><td>supervisor.detect_faults</td><td>fc.tick stale &gt; 500 ms</td></tr>
+  <tr><td>9</td><td><code>FAULT_CURRENT_SENSOR_STALE</code></td><td>supervisor.detect_faults</td><td>acs.tick stale &gt; 500 ms</td></tr>
+  <tr><td>10</td><td><code>FAULT_TC_FAULT</code></td><td>sensor_task</td><td>Any <code>tc_valid[i] == false</code></td></tr>
+  <tr><td>11</td><td><code>FAULT_ENGINE_STALL</code></td><td>supervisor.detect_faults</td><td>ecu.rpm &lt; 1500 in RUN sustained &gt; 2 s</td></tr>
+  <tr><td>12</td><td><code>FAULT_ENGINE_OVERTEMP</code></td><td>sensor_task</td><td>Any cyl TC &gt; 220 °C</td></tr>
+  <tr><td>13</td><td><code>FAULT_RECT_OVERTEMP</code></td><td>supervisor.detect_faults</td><td>IGBT temp &gt; 85 °C</td></tr>
+  <tr><td>14</td><td><code>FAULT_BUS_UNDERVOLT</code></td><td>supervisor.detect_faults</td><td>V_dc &lt; 40 V</td></tr>
+  <tr><td>15</td><td><code>FAULT_BUS_OVERVOLT</code></td><td>supervisor.detect_faults</td><td>V_dc &gt; 60 V</td></tr>
+</table>
+
+<p>Severity table in supervisor maps each bit to <code>SEV_WARN / DEGRADE / FORCE_OFF / FORCE_FAULT</code>. <b>Bench mode: every bit demoted to <code>SEV_WARN</code></b> — detection runs but no state-changing action. Trailing comment in each row of <code>s_fault_severity[]</code> lists the intended flight severity.</p>
+
+<h2>9. HAL isolation</h2>
+
+<p>Only these files may call <code>HAL_*</code> directly: <code>periph_wrappers.c</code>, <code>can_callbacks.c</code>, <code>can.c</code>/<code>tim.c</code>/<code>spi.c</code>/<code>usart.c</code>/<code>dac.c</code>/<code>iwdg.c</code>/<code>gpio.c</code>/<code>dma.c</code> (CubeMX-generated init), the hardware drivers <code>ads1262.c</code> + <code>max31855.c</code>, and <code>swo_io.c</code>. Application tasks use the wrapper API (<code>esc_hw_set_us</code>, <code>ecu_uart_hw_send/recv</code>, <code>pdb_hw_write</code>, <code>watchdog_refresh</code>, <code>led_hw_toggle</code>, <code>can_hw_is_busoff</code>, etc.).</p>
+
+<h2>10. External Lua scripts (run on FC, not PCU)</h2>
+
+<p>Two scripts ship in <code>PCU_Code_Ground/scripts/</code>, copied to FC SD card <code>APM/scripts/</code>:</p>
+
+<ul>
+  <li><code>pcu_telem.lua</code> — polls AP's FlexDebug cache (DroneCAN_get_FlexDebug, 5 Hz × 19 IDs), forwards to MAVLink <code>NAMED_VALUE_FLOAT</code> + writes <code>PCU</code> rows to dataflash. Requires <code>CAN_D1_UC_OPTION |= 512</code> (ENABLE_FLEX_DEBUG).</li>
+  <li><code>pcu_engine_rc.lua</code> — RC7 3-pos switch → SERVO8 PWM (1000/1500/2000) → ActuatorArrayCommand actuator_id=8 → PCU engine state. Requires <code>SERVO8_FUNCTION=94</code> + <code>CAN_D1_UC_SRV_BM |= 128</code>.</li>
+</ul>
+
+<h2>11. Build &amp; dependencies</h2>
+
+<ul>
+  <li>STM32CubeIDE + CubeMX-generated peripheral init. <code>.ioc</code> is the source of truth for CubeMX-managed config.</li>
+  <li>FreeRTOS (CMSIS-RTOS v2 API). Static allocation for tasks (no <code>pvPortMalloc</code> at runtime except libcanard pool).</li>
+  <li>libcanard (vendored under <code>Middlewares/Third_Party/libcanard/</code>).</li>
+  <li>DroneCAN codec headers (vendored under <code>Middlewares/Third_Party/dronecan_codec/</code>). Generated from stock UAVCAN DSDLs; <code>dronecan.protocol.FlexDebug</code> is hand-rolled (encoder lives in fc_link_task.c, decoder via DroneCAN.h).</li>
+  <li>FATFS for SD logging.</li>
+  <li>VESC firmware (sibling repo <code>bldc/</code>): provides the rectifier-side 0x201/0x202 producers and consumes 0x101..0x105.</li>
+</ul>
+
+</body>
+</html>

@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PCU firmware — flowcharts</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; max-width: 1100px; margin: 2em auto; line-height: 1.45; color: #222; }
+  h1 { font-size: 1.8em; border-bottom: 2px solid #555; padding-bottom: 0.2em; }
+  h2 { font-size: 1.3em; border-bottom: 1px solid #aaa; padding-bottom: 0.15em; margin-top: 1.6em; }
+  h3 { font-size: 1.05em; margin-top: 1.2em; }
+  pre { background: #f6f6f6; border: 1px solid #ccc; padding: 0.8em 1em; border-radius: 4px;
+        font-family: "Consolas","Cascadia Mono","Courier New",monospace; font-size: 0.85em;
+        line-height: 1.25; overflow-x: auto; }
+  code { font-family: Consolas,"Courier New",monospace; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.95em; }
+  p { margin: 0.4em 0; }
+  .note { color: #555; font-size: 0.9em; }
+</style>
+</head>
+<body>
+
+<h1>PCU firmware — flowcharts</h1>
+
+<p class="note">Diagrams below use ASCII / box-drawing characters so they paste into Google Docs as preformatted text. Each section is a complete diagram on its own.</p>
+
+<h2>1. System block diagram — tasks &amp; data flow</h2>
+
+<pre>
+                                       PCU (STM32F405, FreeRTOS, 13-substruct g_pt)
+   ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
+   │                                                                                              │
+   │   ┌──────────────┐                  ┌────────────────────────────────────────────────┐       │
+   │   │  fc_link     │   reads/writes   │                                                │       │
+   │   │  20 Hz       │ ◄──────────────► │                                                │       │
+   │   │  CAN1+libcan │                  │                                                │       │
+   │   └──────┬───────┘                  │                                                │       │
+   │          │                          │                                                │       │
+   │   ┌──────┴───────┐                  │                  g_pt  (g_pt_mtx)              │       │
+   │   │  rectifier   │ ◄──────────────► │                                                │       │
+   │   │  200 Hz      │                  │   rect_cmd  rect  fc  ecu  engine              │       │
+   │   │  CAN2+VESC   │                  │   engine_throttle  ctl  acs  tc  cpu           │       │
+   │   └──────┬───────┘                  │   expt  dyno_load  contactor_cmd               │       │
+   │          │                          │   + supervisor_heartbeat  fault_bits           │       │
+   │   ┌──────┴───────┐                  │                                                │       │
+   │   │  ecu         │ ◄──────────────► │                                                │       │
+   │   │  10 Hz       │                  │                                                │       │
+   │   │  USART2 MS   │                  │                                                │       │
+   │   └──────┬───────┘                  │                                                │       │
+   │          │                          │                                                │       │
+   │   ┌──────┴───────┐                  │                                                │       │
+   │   │  sensor      │ ◄──────────────► │                                                │       │
+   │   │  5 Hz        │                  │                                                │       │
+   │   │  ADS+MAX31855│                  │                                                │       │
+   │   └──────┬───────┘                  │                                                │       │
+   │          │                          │                                                │       │
+   │   ┌──────┴───────┐                  │                                                │       │
+   │   │  supervisor  │ ◄──────────────► │                                                │       │
+   │   │  5 Hz        │  fault policy +  │                                                │       │
+   │   │              │  engine state    │                                                │       │
+   │   └──────┬───────┘                  │                                                │       │
+   │          │                          │                                                │       │
+   │   ┌──────┴───────┐                  │                                                │       │
+   │   │  pdb         │ ◄──────────────► │                                                │       │
+   │   │  50 Hz       │  contactor_cmd + │                                                │       │
+   │   │  GPIO+wdog   │  heartbeat watch │                                                │       │
+   │   └──────┬───────┘                  │                                                │       │
+   │          │                          │                                                │       │
+   │   ┌──────┴───────┐                  │                                                │       │
+   │   │  log         │ ────────────────►│  read-only snapshot                            │       │
+   │   │  10 Hz       │                  │                                                │       │
+   │   │  SD/FATFS    │                  │                                                │       │
+   │   └──────────────┘                  │                                                │       │
+   │                                     │                                                │       │
+   │   ┌──────────────┐                  │                                                │       │
+   │   │  rtos_stats  │ ─────────────────►│  writes cpu.load_pct                          │       │
+   │   │  0.2 Hz SWO  │                  │                                                │       │
+   │   └──────────────┘                  └────────────────────────────────────────────────┘       │
+   │                                                                                              │
+   └──────────────────────────────────────────────────────────────────────────────────────────────┘
+        ▲                  ▲                   ▲                  ▲                ▲
+        │ CAN1 1 Mbps      │ CAN2 250 kbps     │ USART2 115k      │ SPI1/2/3        │ PWM PA8/PA10
+        ▼                  ▼                   ▼                  ▼                 │ GPIO PA7/PC3 / contactors
+   ┌─────────┐        ┌─────────┐         ┌────────┐         ┌──────────┐
+   │ Cube+   │        │  VESC   │         │  ECU   │         │ SD / TC  │
+   │ (FC)    │        │ rectifier│         │ Lowheis│         │ / ADS    │
+   │ GPS     │        │         │         │ MegaSqu│         │          │
+   └─────────┘        └─────────┘         └────────┘         └──────────┘
+</pre>
+
+<h2>2. Boot sequence</h2>
+
+<pre>
+   main()
+     │
+     ├─► HAL_Init
+     │
+     ├─► SystemClock_Config           HSI 16 MHz → PLL → SYSCLK 40 MHz, APB1=20 MHz
+     │
+     ├─► MX_*_Init                    GPIO  DMA  CAN1  CAN2  DAC  SPI1/2/3  TIM1
+     │                                FATFS  IWDG  USART2
+     │
+     ├─► __HAL_DBGMCU_FREEZE_CAN1/2   (DEBUG build only — pause CAN on breakpoint)
+     │
+     ├─► osKernelInitialize
+     │
+     └─► MX_FREERTOS_Init
+           │
+           ├─► pt_init                 g_pt = 0, mutex, park throttle at MIN pulse
+           ├─► can_mgr_init            queues, dispatch task, ISRs armed
+           │
+           ├─► rectifier_task_start    osPriorityAboveNormal  1 KB stack
+           ├─► supervisor_task_start   osPriorityHigh         1 KB
+           ├─► dyno_sweep_task_start   (bench)
+           ├─► pdb_task_start          osPriorityAboveNormal  1 KB
+           ├─► sensor_task_start       osPriorityNormal     1.5 KB
+           ├─► log_task_start          osPriorityLow          2 KB
+           ├─► fc_link_task_start      osPriorityAboveNormal  2 KB
+           ├─► ecu_task_start          osPriorityNormal     1.5 KB
+           ├─► rtos_stats_task_start   osPriorityLow          2 KB
+           │
+           └─► defaultTask created     osPriorityNormal  ~0.5 KB
+                 │
+                 └─► PC3 high → 1 s delay → PC3 low → idle forever
+     │
+     └─► osKernelStart (never returns)
+</pre>
+
+<h2>3. Supervisor task — main loop @ 5 Hz</h2>
+
+<pre>
+                                supervisor_task  (every 200 ms)
+                                          │
+                                          ▼
+                ┌─────────────────────────────────────────────────────┐
+                │ snapshot g_pt:  engine.state, engine.req,           │
+                │                 fault_bits, expt.active             │
+                └────────────────────────┬────────────────────────────┘
+                                          ▼
+                                   detect_faults()                        each:
+                                          │                               ├ FC throttle stale
+                                          ▼                               ├ ACS stale
+                              re-read fault_bits                          ├ V_dc range
+                                          │                               ├ IGBT temp
+                                          ▼                               ├ engine stall (2 s deb.)
+                                  worst_severity()                        └ CAN1/2 bus-off
+                                          │
+              ┌──────────┬─────────────┬──┴───┬──────────┐
+              │          │             │      │          │
+              ▼          ▼             ▼      ▼          ▼
+         SEV_NONE     SEV_WARN     SEV_DEGR. SEV_FORCE  SEV_FORCE
+                                              _OFF       _FAULT
+              │          │             │      │          │
+              │          │             │      │          ▼
+              │          │             │      │   engine = FAULT
+              │          │             │      │   swap = IDLE
+              │          │             │      │   req  = NONE
+              │          │             │      ▼
+              │          │             │  engine = OFF, swap = IDLE, req = NONE
+              │          │             ▼
+              │          │      (set degrade = true → safe_idle below)
+              └──────────┴─────────────┴───────┐
+                                                ▼
+                ┌─────────────────────────────────────────────────────┐
+                │  External request handler:                          │
+                │    req != state ?                                   │
+                │      req==RUN  + state==CRANK + swap IDLE → swap    │
+                │      else                              → set direct │
+                └────────────────────────┬────────────────────────────┘
+                                          ▼
+                  switch_now = PA7 ;   degrade = (sev>=DEGRADE)
+                                          │
+                                          ▼
+                ┌─────────────────────────────────────────────────────┐
+                │  Transition entries (engine.state changed):         │
+                │    →RUN:    on_run_entry()                          │
+                │    →CRANK:  re-arm switch                           │
+                │    leaving CRANK/RUN: cancel swap                   │
+                └────────────────────────┬────────────────────────────┘
+                                          ▼
+                  PA7 rising + CRANK + swap IDLE → swap = BLEED
+                                          │
+                                          ▼
+                ┌─────────────────────────────────────────────────────┐
+                │  DISPATCH                                            │
+                │    expt.active  → step aside                        │
+                │    degrade      → safe_idle                         │
+                │    swap_step    → BLEED / LOCK / PRIME              │
+                │    else switch(engine.state):                       │
+                │       OFF / FAULT   → safe_idle                     │
+                │       CRANK         → crank_hold                    │
+                │       RUN           → run_fixed_setpoint (V1 off)   │
+                │       WARMUP/COOL.  → I=0 idle                      │
+                └────────────────────────┬────────────────────────────┘
+                                          ▼
+                    contactor policy → pt_set_contactor_cmds(batt, rect)
+                                          ▼
+                  engine_throttle.req → pt_set_engine_throttle_pct_x100  → TIM1_CH1
+                                          ▼
+                  supervisor_heartbeat++ ; watchdog_refresh()
+                                          ▼
+                                  osDelayUntil(next)
+</pre>
+
+<h2>4. CRANK → RUN swap sub-state machine</h2>
+
+<pre>
+    ENGINE_CRANK              swap_phase changes are owned by supervisor.
+    crank_hold each tick      During SWAP_*  swap_step owns the wire; main switch is bypassed.
+    duty 42 % BLDC
+    throttle 45 %
+
+       │ trigger: pt_request_engine_state(RUN)  OR  PA7 rising edge
+       ▼
+   ┌────────────────┐
+   │ SWAP_BLEED     │  300 ms
+   │ BLDC, I = 0    │   → drain current safely
+   └───────┬────────┘
+           │ elapsed ≥ 300 ms
+           ▼
+   pt_set_motor_type(FOC)
+   pt_set_invert_direction(true)
+           │
+           ▼
+   ┌────────────────┐
+   │ SWAP_LOCK      │  1000 ms
+   │ FOC inv, I = 0 │   → observer convergence
+   └───────┬────────┘
+           │ elapsed ≥ 1000 ms
+           ▼
+   ┌────────────────┐
+   │ SWAP_PRIME     │   500 ms
+   │ FOC inv duty 60%│   → loaded open-loop spool
+   │ throttle  60 % │
+   └───────┬────────┘
+           │ elapsed ≥ 500 ms
+           ▼
+   pt_set_engine_state(RUN)
+   engine.req = NONE
+   swap_phase = IDLE
+           │
+           ▼
+    ENGINE_RUN
+    run_fixed_setpoint  (V1 off)            run_v1  (V1 on)
+    duty 75 % / throttle 50 %                I_bat PID → P_rect → LUT → duty + theta
+</pre>
+
+<h2>5. Fault detection &amp; policy</h2>
+
+<pre>
+   ┌──────────────────┐
+   │ rectifier_task   │ ──► FAULT_RECT_STALE  (>200 ms VESC silence)
+   │                  │ ──► FAULT_RECT_OFFLINE (>2 s)
+   └──────────────────┘
+
+   ┌──────────────────┐
+   │ fc_link_task     │ ──► FAULT_FC_STALE (NodeStatus >1 s)
+   └──────────────────┘
+
+   ┌──────────────────┐
+   │ ecu_task         │ ──► FAULT_ECU_STALE  (no successful poll >1 s)
+   └──────────────────┘
+
+   ┌──────────────────┐
+   │ pdb_task         │ ──► FAULT_SUPERVISOR_HANG  (heartbeat stale >1 s)
+   └──────────────────┘
+
+   ┌──────────────────┐
+   │ sensor_task      │ ──► FAULT_TC_FAULT          (any tc_valid==false)
+   │                  │ ──► FAULT_ENGINE_OVERTEMP   (any cyl TC > 220 °C)
+   └──────────────────┘
+
+   ┌──────────────────┐
+   │ supervisor       │ ──► FAULT_FC_THROTTLE_STALE   (fc.tick >500 ms)
+   │ detect_faults()  │ ──► FAULT_CURRENT_SENSOR_STALE (acs.tick >500 ms)
+   │                  │ ──► FAULT_BUS_UNDERVOLT / OVERVOLT (V_dc out of range)
+   │                  │ ──► FAULT_RECT_OVERTEMP        (IGBT > 85 °C)
+   │                  │ ──► FAULT_ENGINE_STALL         (rpm low in RUN >2 s)
+   │                  │ ──► FAULT_BUS1_BUSOFF / BUS2_BUSOFF  (ESR.BOFF poll)
+   └──────────────────┘
+                            │
+                            ▼
+                      g_pt.fault_bits  (16-bit mask, also broadcast in NodeStatus
+                                        vendor_specific_status_code)
+                            │
+                            ▼
+                    worst_severity()        bench-mode currently
+                                            demotes EVERY bit to SEV_WARN
+                            │
+            ┌───────────────┼───────────────────────┬────────────────────┐
+            ▼               ▼                       ▼                    ▼
+       SEV_WARN        SEV_DEGRADE            SEV_FORCE_OFF        SEV_FORCE_FAULT
+       no action       safe_idle              engine = OFF         engine = FAULT
+                       rect contactor OPEN    swap aborted         batt + rect OPEN
+</pre>
+
+<h2>6. End-to-end command path — RC switch to engine state</h2>
+
+<pre>
+   RC TX  ─►  RC RX  ─►  Pixhawk RC input  ─►  pcu_engine_rc.lua  (FC SD, 10 Hz)
+                                                       │
+                                                       ▼
+                                  rc:get_pwm(7)  →  classify  →  OUT 1000/1500/2000
+                                                       │
+                                                       ▼
+                              SRV_Channels:set_output_pwm_chan_timeout(SERVO8, ...)
+                                                       │
+                                                       ▼
+                              AP DroneCAN actuator bridge (because SRV_BM bit 7)
+                                                       │
+                                                       ▼
+                       uavcan.equipment.actuator.ArrayCommand (DTID 1010)
+                                                       │
+                                                       ▼   CAN1 1 Mbps
+                                            ┌──── PCU fc_link_task ───┐
+                                            │ on_transfer_received     │
+                                            │ actuator_id == 8 ?       │
+                                            │   decode UNITLESS / PWM  │
+                                            │   → OFF / CRANK / RUN    │
+                                            └─────────┬────────────────┘
+                                                       ▼
+                                          pt_request_engine_state(req)
+                                                       │
+                                                       ▼
+                                      g_pt.engine.req (with pre-flight gate)
+                                                       │
+                                                       ▼ supervisor (5 Hz)
+                                          OFF/CRANK direct  |  RUN via swap
+</pre>
+
+<h2>7. End-to-end telemetry path — PCU sensors to Mission Planner</h2>
+
+<pre>
+   VESC ─► 0x201/0x202 (CAN2)                    ECU ─► MegaSquirt 'A' (USART2)
+            │                                         │
+            ▼                                         ▼
+       rectifier_task  ────────► g_pt.rect ◄────── ecu_task
+                                  g_pt.ecu
+                                       ▲
+                                       │
+   ADS1262 ─► sensor_task ─► g_pt.acs / g_pt.tc
+
+                                       │
+                                       ▼
+                            fc_link_task::publish_flex_debug_batch
+                              (5 Hz × 19 fields, single-frame float32)
+                                       │
+                                       ▼   CAN1 1 Mbps
+                  dronecan.protocol.FlexDebug  (DTID 16371)
+                                       │
+                                       ▼
+                  AP_DroneCAN::handle_FlexDebug  (gated by ENABLE_FLEX_DEBUG=512)
+                                       │
+                                       ▼
+                  AP cache  (per source_node, msg.id, with timestamp)
+                                       │
+                                       ▼
+                  pcu_telem.lua  (5 Hz polling via DroneCAN_get_FlexDebug)
+                                       │
+                       ┌───────────────┴───────────────┐
+                       ▼                               ▼
+       gcs:send_named_float(name, value)     logger:write("PCU", "Name,Value", "Nf", ...)
+                       │                               │
+                       ▼                               ▼
+            MAVLink NAMED_VALUE_FLOAT            FC SD dataflash BIN
+                       │                          (PCU rows)
+                       ▼
+            MP Tuning view  (MAV_DUT, MAV_THR, ...)  +  tlog
+</pre>
+
+<h2>8. End-to-end throttle path — FC throttle to engine + VESC</h2>
+
+<pre>
+   ArduPilot motor mixer  ─►  esc.RawCommand (6 channels)  ─►  CAN1
+                                                                 │
+                                                                 ▼
+                                              PCU fc_link_task on_transfer_received
+                                              average cmd[0..len-1] → 0..100 % pct
+                                                                 │
+                                                                 ▼
+                                              pt_set_fc_inputs(mode, throttle_pct)
+                                                                 │
+                                                                 ▼
+                                                            g_pt.fc
+                                                                 │
+                                                                 ▼ (read by supervisor — NOT used by run_fixed_setpoint;
+                                                                    only consumed by V1 when RUN_USE_V1_CONTROLLER=1)
+                                                                 │
+   supervisor dispatch ──► run_fixed_setpoint  (or run_v1 when enabled)
+                              │
+                              ▼
+                  pt_set_setpoint_duty(7500, MODE_CRUISE)        g_pt.engine_throttle.req_pct_x100 = 5000
+                              │                                            │
+                              ▼                                            ▼
+                       g_pt.rect_cmd                            pt_set_engine_throttle_pct_x100()
+                              │                                            │
+                              ▼ rectifier_task (200 Hz)                    ▼
+                  encode 0x103 duty cmd                              TIM1_CH1 CCR  →  PA8 PWM 2273 µs
+                              │
+                              ▼   CAN2 250 kbps
+                          VESC rectifier
+</pre>
+
+<h2>9. Per-task one-line summary (current code)</h2>
+
+<pre>
+   defaultTask       boot one-shot PC3 1 s pulse, then idle
+   supervisor        5 Hz    state machine, fault policy, contactor cmd, throttle mirror, heartbeat
+   rectifier         200 Hz  VESC link on CAN2 (TX 0x101-0x105, RX 0x201/0x202)
+   pdb               50 Hz   contactor GPIOs + supervisor-hang watchdog (FAULT_SUPERVISOR_HANG)
+   sensor            5 Hz    ADS1262 currents + MAX31855 thermocouples → g_pt.acs / g_pt.tc
+   log               10 Hz   FATFS SD CSV writes, f_sync every 10 rows
+   fc_link           20 Hz   libcanard on CAN1 (RX commands+param+NodeStatus, TX NodeStatus 1 Hz + FlexDebug 5 Hz)
+   ecu               10 Hz   USART2 MegaSquirt 'A' poll, 212-byte block decode
+   can_disp          1 ms    CAN RX dispatch poll (TODO: ISR-driven)
+   dyno_sweep        bench   cooperative; supervisor steps aside when expt.active
+   rtos_stats        5 s     SWO per-task CPU %, stack HWM
+   IDLE hook         —       500 ms LED toggle (idle starvation indicator)
+</pre>
+
+</body>
+</html>

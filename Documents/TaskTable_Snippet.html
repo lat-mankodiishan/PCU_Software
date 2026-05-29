@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PCU tasks — priority, period, rationale</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; max-width: 1100px; margin: 2em auto; line-height: 1.45; color: #222; }
+  h2 { font-size: 1.3em; border-bottom: 1px solid #aaa; padding-bottom: 0.15em; margin-top: 0; }
+  code { font-family: Consolas, "Courier New", monospace; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.95em; }
+  table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+  th, td { border: 1px solid #888; padding: 4px 8px; text-align: left; vertical-align: top; }
+  th { background: #e8e8e8; }
+</style>
+</head>
+<body>
+
+<h2>All tasks — priority, period, rationale</h2>
+
+<table>
+  <tr>
+    <th>Task</th>
+    <th>Prio</th>
+    <th>Period</th>
+    <th>Stack</th>
+    <th>Why this priority + rate</th>
+  </tr>
+  <tr>
+    <td><code>supervisor</code></td>
+    <td><b>High (5)</b></td>
+    <td>200 ms / 5 Hz</td>
+    <td>1 KB</td>
+    <td>Highest application prio. Owns the state machine + fault policy + watchdog kick. Pre-empts everything else; must run on time or IWDG resets. 5 Hz matches sensor rate — I_bat fresh data once per loop.</td>
+  </tr>
+  <tr>
+    <td><code>rectifier</code></td>
+    <td>AboveNormal (4)</td>
+    <td><b>5 ms / 200 Hz</b></td>
+    <td>1 KB</td>
+    <td>VESC link freshness — sends latest setpoint every tick so VESC sees fresh commands well inside its safety timeout. Highest-frequency task.</td>
+  </tr>
+  <tr>
+    <td><code>pdb</code></td>
+    <td>AboveNormal (4)</td>
+    <td>20 ms / 50 Hz</td>
+    <td>1 KB</td>
+    <td>Contactor GPIO + supervisor heartbeat watchdog. 50 Hz gives 50 ms detection latency on a hung supervisor while still being cheap.</td>
+  </tr>
+  <tr>
+    <td><code>fc_link</code></td>
+    <td>AboveNormal (4)</td>
+    <td>50 ms / 20 Hz</td>
+    <td>2 KB</td>
+    <td>DroneCAN gateway. 20 Hz comfortably handles 5 Hz FlexDebug TX and 1 Hz NodeStatus, plus drains the RX queue with low latency.</td>
+  </tr>
+  <tr>
+    <td><code>can_disp</code></td>
+    <td>AboveNormal (4)</td>
+    <td>1 ms poll</td>
+    <td>2 KB</td>
+    <td>CAN RX dispatch — walks per-bus queues and fans frames to subscribers. Polling at 1 ms is sub-optimal; TODO to switch to ISR thread-flag.</td>
+  </tr>
+  <tr>
+    <td><code>sensor</code></td>
+    <td>Normal (3)</td>
+    <td>200 ms / 5 Hz</td>
+    <td>1.5 KB</td>
+    <td>ADS1262 scan + 3× MAX31855 read. Lower prio than the CAN cluster because data is only consumed by supervisor (also 5 Hz).</td>
+  </tr>
+  <tr>
+    <td><code>ecu</code></td>
+    <td>Normal (3)</td>
+    <td>100 ms / 10 Hz</td>
+    <td>1.5 KB</td>
+    <td>USART2 MegaSquirt 'A' poll. RX timeout 250 ms — blocks via DMA semaphore, so other Normal-prio work isn't starved during the wait.</td>
+  </tr>
+  <tr>
+    <td><code>defaultTask</code></td>
+    <td>Normal (3)</td>
+    <td>one-shot</td>
+    <td>~0.5 KB</td>
+    <td>Boot pulse PC3 high 1 s → low → idle forever (<code>osDelay(1000)</code> loop).</td>
+  </tr>
+  <tr>
+    <td><code>dyno_sweep</code></td>
+    <td>(bench-cfg)</td>
+    <td>bench</td>
+    <td>—</td>
+    <td>Cooperative; supervisor steps aside via <code>expt.active</code>. Not a flight task.</td>
+  </tr>
+  <tr>
+    <td><code>log</code></td>
+    <td>Low (2)</td>
+    <td>100 ms / 10 Hz</td>
+    <td>2 KB</td>
+    <td>SD writes. Lowest acceptable rate that captures all 5 Hz data with margin. <code>f_sync</code> only every 10 writes (1 Hz) to avoid SD flash thrash.</td>
+  </tr>
+  <tr>
+    <td><code>rtos_stats</code></td>
+    <td>Low (2)</td>
+    <td>5000 ms / 0.2 Hz</td>
+    <td>2 KB</td>
+    <td>Periodic CPU + stack HWM dump to SWO. Diagnostic only.</td>
+  </tr>
+  <tr>
+    <td><code>IDLE</code> hook</td>
+    <td>(idle)</td>
+    <td>—</td>
+    <td>—</td>
+    <td>LED toggle every 500 ms. Proves the idle task gets to run (= system isn't 100 % loaded).</td>
+  </tr>
+</table>
+
+</body>
+</html>

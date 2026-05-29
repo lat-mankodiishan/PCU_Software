@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Supervisor & Control Law — code reference</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; max-width: 900px; margin: 2em auto; line-height: 1.45; color: #222; }
+  h1 { font-size: 1.8em; border-bottom: 2px solid #555; padding-bottom: 0.2em; }
+  h2 { font-size: 1.35em; border-bottom: 1px solid #aaa; padding-bottom: 0.15em; margin-top: 1.6em; }
+  h3 { font-size: 1.1em; margin-top: 1.3em; }
+  code { font-family: Consolas, "Courier New", monospace; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.95em; }
+  table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+  th, td { border: 1px solid #888; padding: 4px 8px; text-align: left; vertical-align: top; }
+  th { background: #e8e8e8; }
+  ul { margin: 0.4em 0; padding-left: 1.4em; }
+  ol { margin: 0.4em 0; padding-left: 1.4em; }
+  li { margin: 0.15em 0; }
+  .small { color: #555; font-size: 0.9em; }
+</style>
+</head>
+<body>
+
+<h1>Supervisor &amp; Control Law — current code reference</h1>
+
+<p><b>Role.</b> <code>supervisor_task</code> is the powertrain state machine. It consumes external commands (RC via Lua, MP param.GetSet, GPIO PA7), enforces fault policy, sequences the BLDC↔FOC motor swap on CRANK→RUN, drives the rectifier setpoint, mirrors engine throttle to PWM, and emits a heartbeat for <code>pdb_task</code>. <code>control_law.c</code> holds the V1 hybrid controller — currently <b>wired but disabled</b> via <code>RUN_USE_V1_CONTROLLER = 0</code>.</p>
+
+<h2>supervisor_task.c</h2>
+
+<h3>Constants &amp; timing</h3>
+<table>
+  <tr><th>Define</th><th>Value</th><th>Purpose</th></tr>
+  <tr><td><code>SUP_PERIOD_MS</code></td><td>200</td><td>5 Hz main loop, matches sensor_task</td></tr>
+  <tr><td><code>CRANK_BLDC_DUTY_X10000</code></td><td>4200</td><td>42 % BLDC duty in ENGINE_CRANK</td></tr>
+  <tr><td><code>CRANK_THROTTLE_PCT_X100</code></td><td>4500</td><td>45 % engine throttle in ENGINE_CRANK</td></tr>
+  <tr><td><code>SWAP_BLEED_MS</code></td><td>300</td><td>I=0 BLDC drain before motor-type swap</td></tr>
+  <tr><td><code>SWAP_LOCK_MS</code></td><td>1000</td><td>FOC inv I=0 observer convergence</td></tr>
+  <tr><td><code>SWAP_PRIME_MS</code></td><td>500</td><td>Loaded open-loop prime before V1 takes over</td></tr>
+  <tr><td><code>PRIME_DUTY_X10000</code></td><td>6000</td><td>60 % FOC inv duty in PRIME</td></tr>
+  <tr><td><code>PRIME_THROTTLE_PCT_X100</code></td><td>6000</td><td>60 % engine throttle in PRIME</td></tr>
+  <tr><td><code>RUN_USE_V1_CONTROLLER</code></td><td>0</td><td>0 = run_fixed_setpoint, 1 = control_law_v1_step</td></tr>
+  <tr><td><code>RUN_DUTY_X10000</code></td><td>7500</td><td>75 % fixed FOC duty in ENGINE_RUN (V1 off)</td></tr>
+  <tr><td><code>RUN_THROTTLE_PCT_X100</code></td><td>5000</td><td>50 % fixed engine throttle in ENGINE_RUN (V1 off)</td></tr>
+  <tr><td><code>FC_THROTTLE_STALE_MS</code></td><td>500</td><td>fc.tick stale threshold for FAULT_FC_THROTTLE_STALE</td></tr>
+  <tr><td><code>CURRENT_SENSOR_STALE_MS</code></td><td>500</td><td>acs.tick stale threshold</td></tr>
+  <tr><td><code>RECT_OVERTEMP_C</code></td><td>85</td><td>IGBT over-temp threshold (TUNE)</td></tr>
+  <tr><td><code>BUS_UNDERVOLT_CV</code> / <code>BUS_OVERVOLT_CV</code></td><td>4000 / 6000</td><td>40 V / 60 V (TUNE for battery pack)</td></tr>
+  <tr><td><code>ENGINE_STALL_MIN_RPM</code> / <code>ENGINE_STALL_MS</code></td><td>1500 / 2000</td><td>RPM threshold + 2 s debounce</td></tr>
+</table>
+
+<p><b>Task priority:</b> <code>osPriorityHigh</code> (5). Stack 256 words (1 KB). Switch GPIO: PA7 input.</p>
+
+<h3>Internal state (static)</h3>
+<ul>
+  <li><code>s_v1_state</code>, <code>s_v1_params</code> — <code>#if RUN_USE_V1_CONTROLLER</code> only.</li>
+  <li><code>s_prev_engine_state</code> — for transition-edge detection.</li>
+  <li><code>s_swap_phase</code>, <code>s_swap_tick</code> — sub-state machine for CRANK→RUN.</li>
+  <li><code>s_switch_prev</code> — debounce for GPIO PA7 rising edge.</li>
+</ul>
+
+<h3>Severity policy (bench mode = all WARN)</h3>
+<p><code>fault_severity_t</code>: <code>SEV_NONE &lt; SEV_WARN &lt; SEV_DEGRADE &lt; SEV_FORCE_OFF &lt; SEV_FORCE_FAULT</code>. Lookup table <code>s_fault_severity[16]</code> maps each fault bit to a severity. <code>worst_severity(f)</code> walks the 16 bits, returns the highest. Currently <b>every entry is SEV_WARN</b> (bench override). Trailing comment in each row preserves the intended-for-flight severity.</p>
+
+<h3>Main task loop @ 5 Hz</h3>
+<ol>
+  <li><b>Snapshot</b> <code>engine.state</code>, <code>engine.req</code>, <code>fault_bits</code>, <code>expt.active</code> under <code>g_pt_mtx</code>.</li>
+  <li><b>Detect faults:</b> <code>detect_faults(now, engine_state)</code> (see below). Re-read <code>fault_bits</code>.</li>
+  <li><b>Severity policy:</b> <code>sev = worst_severity(faults)</code>.
+    <ul>
+      <li><code>SEV_FORCE_FAULT</code> + not already FAULT → <code>pt_set_engine_state(ENGINE_FAULT)</code>, abort swap, clear req.</li>
+      <li><code>SEV_FORCE_OFF</code> + not OFF/FAULT → <code>pt_set_engine_state(ENGINE_OFF)</code>, abort swap, clear req.</li>
+    </ul>
+  </li>
+  <li><b>External request handler:</b>
+    <ul>
+      <li><code>engine.req != engine.state</code>:
+        <ul>
+          <li><code>req == RUN</code>: only fires swap if currently CRANK and swap IDLE.</li>
+          <li>Else (OFF / CRANK / FAULT etc.): apply direct via <code>pt_set_engine_state</code>, abort swap, clear req.</li>
+        </ul>
+      </li>
+      <li><code>req == engine.state</code>: clear req.</li>
+    </ul>
+  </li>
+  <li><b>Compute</b> <code>degrade = (sev &gt;= SEV_DEGRADE)</code>, <code>switch_now</code> = PA7 read.</li>
+  <li><b>Transition entries</b> when <code>engine_state != s_prev_engine_state</code>:
+    <ul>
+      <li>Entering RUN: <code>on_run_entry()</code> (FOC inv + V1 init when enabled).</li>
+      <li>Entering CRANK: re-arm GPIO switch (<code>s_switch_prev = switch_now</code>).</li>
+      <li>Leaving CRANK/RUN: cancel any in-progress swap.</li>
+    </ul>
+  </li>
+  <li><b>Rising-edge detect</b> on PA7 → if (not expt_active, engine_state CRANK, swap IDLE), fire <code>s_swap_phase = SWAP_BLEED</code>.</li>
+  <li><b>Dispatch:</b>
+    <ul>
+      <li><code>expt_active</code>: step aside (experiment owns the wire).</li>
+      <li><code>degrade</code>: <code>safe_idle()</code>.</li>
+      <li><code>swap_step(now) == true</code>: swap drove the wire this tick.</li>
+      <li>Else switch on <code>engine_state</code>: <code>CRANK→crank_hold</code>, <code>RUN→run_fixed_setpoint</code> (or <code>run_v1</code> when enabled), <code>WARMUP/COOLDOWN→I=0 idle</code>, <code>OFF/FAULT→safe_idle</code>.</li>
+    </ul>
+  </li>
+  <li><b>Contactor policy:</b> <code>batt_close = !engine_fault</code>, <code>rect_close = !engine_fault &amp;&amp; !degrade</code>. <code>pt_set_contactor_cmds(batt, rect)</code> mirrors via <code>pdb_task</code> GPIOs.</li>
+  <li><b>Throttle PWM mirror:</b> read <code>engine_throttle.req_pct_x100</code>, call <code>pt_set_engine_throttle_pct_x100(req)</code> which writes TIM1_CH1 CCR.</li>
+  <li><b>Heartbeat:</b> <code>g_pt.supervisor_heartbeat++</code> (consumed by pdb_task hang detector).</li>
+  <li><b>Watchdog:</b> <code>watchdog_refresh()</code> kicks IWDG.</li>
+  <li><code>osDelayUntil(next)</code>.</li>
+</ol>
+
+<h3>Per-mode helpers</h3>
+<table>
+  <tr><th>Function</th><th>Effect on g_pt / wire</th></tr>
+  <tr><td><code>safe_idle()</code></td><td><code>pt_set_setpoint(0, MODE_IDLE)</code> → I=0 CURRENT mode. <code>engine_throttle.req_pct_x100 = 0</code>.</td></tr>
+  <tr><td><code>crank_hold()</code></td><td><code>pt_set_motor_type(BLDC)</code> + <code>pt_set_invert_direction(false)</code> + <code>pt_set_setpoint_duty(4200, MODE_TAKEOFF)</code>. <code>engine_throttle.req_pct_x100 = 4500</code>.</td></tr>
+  <tr><td><code>on_run_entry()</code></td><td><code>pt_set_motor_type(FOC)</code> + <code>pt_set_invert_direction(true)</code>. Calls <code>control_law_v1_init</code> when V1 enabled.</td></tr>
+  <tr><td><code>run_fixed_setpoint()</code> <span class="small">(V1 disabled)</span></td><td><code>pt_set_setpoint_duty(7500, MODE_CRUISE)</code>. <code>engine_throttle.req_pct_x100 = 5000</code>. Also mirrors values into <code>ctl.duty_x10000</code> / <code>ctl.theta_pct_x100</code> so telemetry shows the operating point.</td></tr>
+  <tr><td><code>run_v1(now)</code> <span class="small">(V1 enabled)</span></td><td>Reads <code>acs.mA[2]</code>, <code>rect.state.V_dc_cV</code>, <code>rect.state.gen_rpm</code>. Calls <code>control_law_v1_step</code>. Writes <code>duty_x10000</code> via <code>pt_set_setpoint_duty(MODE_CRUISE)</code>; mirrors <code>theta</code> + all <code>ctl.*</code> fields.</td></tr>
+</table>
+
+<h3>CRANK → RUN swap sub-state machine (swap_step)</h3>
+<table>
+  <tr><th>Phase</th><th>Duration</th><th>Motor</th><th>Duty</th><th>Throttle</th><th>Purpose</th></tr>
+  <tr><td>SWAP_BLEED</td><td>300 ms</td><td>BLDC</td><td>0</td><td>(unchanged, carries 45 % from CRANK)</td><td>Drain current before motor swap</td></tr>
+  <tr><td>(swap edge)</td><td>—</td><td>BLDC→FOC inv</td><td>—</td><td>—</td><td><code>pt_set_motor_type(FOC) + pt_set_invert_direction(true)</code></td></tr>
+  <tr><td>SWAP_LOCK</td><td>1000 ms</td><td>FOC inv</td><td>0</td><td>(unchanged)</td><td>FOC observer convergence</td></tr>
+  <tr><td>SWAP_PRIME</td><td>500 ms</td><td>FOC inv</td><td><b>60 %</b></td><td><b>60 %</b></td><td>Loaded open-loop spool toward operating point</td></tr>
+  <tr><td>(exit)</td><td>—</td><td>—</td><td>—</td><td>—</td><td><code>pt_set_engine_state(ENGINE_RUN)</code>, swap_phase = IDLE, clear engine.req</td></tr>
+</table>
+
+<p>While the swap is active, <code>swap_step(now)</code> returns <code>true</code> and the main switch is bypassed. Fault policy can still abort by setting <code>s_swap_phase = SWAP_IDLE</code> and forcing engine_state.</p>
+
+<h3>Fault detection (detect_faults)</h3>
+<p>Snapshots <code>fc.tick</code>, <code>acs.tick</code>, <code>rect.tick</code>, <code>rect.state.V_dc_cV</code>, <code>rect.state.igbt_temp_C</code>, <code>ecu.rpm</code> under one mutex acquire, then evaluates and raises/clears these bits:</p>
+<table>
+  <tr><th>Fault</th><th>Condition</th></tr>
+  <tr><td><code>FAULT_FC_THROTTLE_STALE</code></td><td><code>now - fc.tick &gt; 500 ms</code></td></tr>
+  <tr><td><code>FAULT_CURRENT_SENSOR_STALE</code></td><td><code>now - acs.tick &gt; 500 ms</code></td></tr>
+  <tr><td><code>FAULT_BUS_OVERVOLT</code></td><td><code>V_dc_cV &gt; 6000</code> (rect fresh)</td></tr>
+  <tr><td><code>FAULT_BUS_UNDERVOLT</code></td><td><code>V_dc_cV &lt; 4000</code> (rect fresh)</td></tr>
+  <tr><td><code>FAULT_RECT_OVERTEMP</code></td><td><code>igbt_temp_C &gt; 85</code> (rect fresh)</td></tr>
+  <tr><td><code>FAULT_ENGINE_STALL</code></td><td><code>engine_state == RUN &amp;&amp; ecu.rpm &lt; 1500</code> sustained &gt; 2 s</td></tr>
+  <tr><td><code>FAULT_BUS1_BUSOFF</code></td><td><code>can_hw_is_busoff(CAN_BUS_DRONECAN)</code></td></tr>
+  <tr><td><code>FAULT_BUS2_BUSOFF</code></td><td><code>can_hw_is_busoff(CAN_BUS_ENGINE)</code></td></tr>
+</table>
+<p>Other faults are raised by their owning tasks (<code>RECT_STALE</code>/<code>RECT_OFFLINE</code> by rectifier_task; <code>FC_STALE</code> by fc_link_task; <code>ECU_STALE</code> by ecu_task; <code>SUPERVISOR_HANG</code> by pdb_task; <code>TC_FAULT</code>/<code>ENGINE_OVERTEMP</code> by sensor_task).</p>
+
+<h2>control_law.c / control_law.h (V1 controller)</h2>
+
+<p><b>Status:</b> source-present, default params populated, <b>not on the wire</b> right now (gated by <code>RUN_USE_V1_CONTROLLER = 0</code> in supervisor). When flipped on, <code>run_v1()</code> in supervisor calls <code>control_law_v1_step()</code> every 200 ms.</p>
+
+<h3>Architecture</h3>
+<p>Single cascade: <b>I_bat PID → I_rect_demand → P_rect = I × V → LUT(P_rect) → (duty, theta_engine)</b>. All Q15 fixed-point, single 16-bit working integers, no float. Output is rectifier duty + engine throttle %.</p>
+
+<h3>Data structures (control_law.h)</h3>
+<table>
+  <tr><th>Struct</th><th>Fields</th></tr>
+  <tr><td><code>ctl_v1_params_t</code></td><td><code>kp_q15, ki_q15, kd_q15</code> (PID per-tick), <code>i_term_max_cA</code>, <code>i_bat_ref_cA</code>, <code>i_rect_max_cA</code>, <code>i_rect_slew_cA</code>, <code>i_bat_alpha_q15</code> (EMA), <code>omega_min_rpm</code>/<code>omega_floor_rpm</code> (anti-stall), <code>i_rect_sat_margin_cA</code>, <code>theta_sat_x100</code>, <code>i_bat_ref_boost_cA</code></td></tr>
+  <tr><td><code>ctl_v1_state_t</code></td><td><code>i_term_cA</code> (integrator), <code>i_bat_filt_cA</code> (EMA state), <code>i_bat_prev_cA</code> (for D), <code>i_rect_demand_cA</code> (slew-limited output), <code>init_done</code></td></tr>
+  <tr><td><code>ctl_v1_inputs_t</code></td><td><code>i_bat_meas_cA</code>, <code>v_bus_cV</code>, <code>gen_rpm</code></td></tr>
+  <tr><td><code>ctl_v1_output_t</code></td><td><code>i_rect_demand_cA</code>, <code>duty_x10000</code>, <code>theta_engine_pct_x100</code>, <code>p_rect_W</code>, <code>i_bat_ref_eff_cA</code></td></tr>
+</table>
+
+<h3>Default params (5 Hz tuning) — control_law_v1_default_params()</h3>
+<table>
+  <tr><th>Param</th><th>Value</th><th>Meaning</th></tr>
+  <tr><td><code>kp_q15</code></td><td>16384</td><td>0.5 (rate-independent)</td></tr>
+  <tr><td><code>ki_q15</code></td><td>3280</td><td>~0.5 / s integrator @ 5 Hz</td></tr>
+  <tr><td><code>kd_q15</code></td><td>0</td><td>derivative disabled</td></tr>
+  <tr><td><code>i_term_max_cA</code></td><td>5000</td><td>±50 A integrator clamp</td></tr>
+  <tr><td><code>i_bat_ref_cA</code></td><td>500</td><td>+5 A discharge target</td></tr>
+  <tr><td><code>i_rect_max_cA</code></td><td>I_RECT_MAX_CA = 16000</td><td>160 A hard clamp</td></tr>
+  <tr><td><code>i_rect_slew_cA</code></td><td>400</td><td>20 A/s @ 5 Hz</td></tr>
+  <tr><td><code>i_bat_alpha_q15</code></td><td>3000</td><td>per-tick EMA on I_bat</td></tr>
+  <tr><td><code>omega_min_rpm</code> / <code>omega_floor_rpm</code></td><td>2500 / 1500</td><td>derate band / hard cut</td></tr>
+  <tr><td><code>i_rect_sat_margin_cA</code></td><td>1000</td><td>within 10 A of i_rect_max</td></tr>
+  <tr><td><code>theta_sat_x100</code></td><td>9500</td><td>within 5 % of full throttle <span class="small">(currently parsed but feedback path unwired)</span></td></tr>
+  <tr><td><code>i_bat_ref_boost_cA</code></td><td>1000</td><td>+10 A added to ref on saturation</td></tr>
+</table>
+
+<h3>Step algorithm — control_law_v1_step(st, in, p, out)</h3>
+<ol>
+  <li><b>I_bat EMA:</b> initialise <code>i_bat_filt_cA</code> from raw on first call. Otherwise <code>filt += alpha_q15 × (meas - filt) &gt;&gt; 15</code>. Clamp to int16.</li>
+  <li><b>Effective I_bat_ref:</b> start from <code>i_bat_ref_cA</code>. If last-tick <code>i_rect_demand_cA &gt; i_rect_max - sat_margin</code>, add <code>i_bat_ref_boost_cA</code> so the battery picks up the slack. <span class="small">(Cyl-temp boost migrated to fault path; theta_sat boost not yet wired.)</span></li>
+  <li><b>PID:</b> <code>err = filt - i_bat_ref_eff</code>. <code>p_term = (err × kp_q15) &gt;&gt; 15</code>. <code>i_term += (err × ki_q15) &gt;&gt; 15</code> clamped to ±<code>i_term_max_cA</code>. <code>d_term = (filt - prev_filt) × kd_q15 &gt;&gt; 15</code>. PID output is the increment: <code>target = i_rect_demand + p + i + d</code>.</li>
+  <li><b>Anti-stall RPM clamp:</b> if <code>gen_rpm &lt; omega_floor_rpm</code> → <code>target = 0</code>. Else if <code>&lt; omega_min_rpm</code> → linear derate scaling target by (rpm − floor) / (min − floor).</li>
+  <li><b>Clamp + slew:</b> clamp <code>target</code> to <code>[0, i_rect_max_cA]</code>. Slew-limit delta vs last tick to ±<code>i_rect_slew_cA</code>. Store as new <code>i_rect_demand_cA</code>.</li>
+  <li><b>P_rect:</b> <code>p_rect_W = max(0, i_rect_demand_cA) × v_bus_cV / 10000</code>.</li>
+  <li><b>LUT:</b> <code>control_law_v1_lut(p_rect_W, &amp;duty_x10000, &amp;theta_pct_x100)</code>.</li>
+  <li><b>Output:</b> fill <code>ctl_v1_output_t</code>.</li>
+</ol>
+
+<h3>LUT — control_law_v1_lut() (placeholder)</h3>
+<p>Linear ramp capped at <code>V1_LUT_P_RECT_MAX_W = 4500</code> W:</p>
+<ul>
+  <li><code>duty_x10000  = clamp(p / 4500) × 9500</code> (caps duty at 95 %)</li>
+  <li><code>theta_pct_x100 = clamp(p / 4500) × 10000</code> (caps theta at 100 %)</li>
+</ul>
+<p>Intended to be replaced with a bench-calibrated piecewise table from a dyno sweep.</p>
+
+<h3>Sign / unit conventions</h3>
+<ul>
+  <li><code>i_bat_meas_cA</code> is +discharge (positive = battery draining). PID error = filtered − ref, so positive error means draining too fast → demand more rectifier current.</li>
+  <li>Outputs are positive-only after the LUT (no regen path), even though <code>i_rect_demand_cA</code> is signed int16 internally.</li>
+  <li>All percent fields use 0.01 %/LSB: 0..10000 = 0..100 %.</li>
+  <li>Currents use 0.01 A/LSB (cA); voltages 0.01 V/LSB (cV).</li>
+</ul>
+
+<h3>Init &amp; default helpers</h3>
+<ul>
+  <li><code>control_law_v1_init(st)</code> — zeros integrator + EMA state; <code>init_done = false</code> so the EMA snaps to the first sample.</li>
+  <li><code>control_law_v1_default_params(p)</code> — populates the table above; meant as starting points, not flight gains.</li>
+</ul>
+
+<h2>End-to-end paths</h2>
+
+<p><b>RC switch → engine action:</b><br>
+Lua publishes <code>ArrayCommand actuator_id=8</code> → <code>fc_link_task</code> → <code>pt_request_engine_state()</code> → supervisor's external request handler → OFF/CRANK direct, or RUN via <code>SWAP_BLEED → LOCK → PRIME → ENGINE_RUN</code>.</p>
+
+<p><b>Engine state → wire (per tick):</b><br>
+<code>engine.state</code> → supervisor dispatch → <code>safe_idle</code> / <code>crank_hold</code> / <code>swap_step</code> / <code>run_fixed_setpoint</code> → <code>pt_set_setpoint*</code> → <code>g_pt.rect_cmd</code> → <code>rectifier_task</code> (200 Hz) → VESC over CAN2. Engine throttle: <code>g_pt.engine_throttle.req_pct_x100</code> → <code>pt_set_engine_throttle_pct_x100</code> → TIM1_CH1 PWM.</p>
+
+<p><b>Fault → action:</b><br>
+Per-task or <code>detect_faults</code> set a bit in <code>g_pt.fault_bits</code> → supervisor reads → <code>worst_severity</code> picks the strongest → <code>SEV_DEGRADE</code> safe_idles + opens rect contactor; <code>SEV_FORCE_OFF</code> sets ENGINE_OFF; <code>SEV_FORCE_FAULT</code> sets ENGINE_FAULT + opens battery contactor. <b>Currently every fault is demoted to <code>SEV_WARN</code> (bench mode), so detection runs but no action is taken.</b></p>
+
+</body>
+</html>

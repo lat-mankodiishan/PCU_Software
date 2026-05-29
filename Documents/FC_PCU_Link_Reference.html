@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FC ↔ PCU link — code reference</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; max-width: 900px; margin: 2em auto; line-height: 1.45; color: #222; }
+  h1 { font-size: 1.8em; border-bottom: 2px solid #555; padding-bottom: 0.2em; }
+  h2 { font-size: 1.35em; border-bottom: 1px solid #aaa; padding-bottom: 0.15em; margin-top: 1.6em; }
+  h3 { font-size: 1.1em; margin-top: 1.3em; }
+  code { font-family: Consolas, "Courier New", monospace; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.95em; }
+  table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+  th, td { border: 1px solid #888; padding: 4px 8px; text-align: left; vertical-align: top; }
+  th { background: #e8e8e8; }
+  ul { margin: 0.4em 0; padding-left: 1.4em; }
+  li { margin: 0.15em 0; }
+  .small { color: #555; font-size: 0.9em; }
+</style>
+</head>
+<body>
+
+<h1>FC ↔ PCU link — current code reference</h1>
+
+<p><b>Topology.</b> CAN1 @ 1 Mbps, PB8/PB9, <code>TransmitFifoPriority = ENABLE</code>. PCU node 50, FC node 10. PCU's <code>fc_link_task</code> owns the only <code>CanardInstance</code>; no other task touches libcanard. RX path is <code>can_manager</code> dispatch queue → <code>canardHandleRxFrame</code>. TX path is <code>drain_canard_tx()</code> → <code>can_mgr_send(CAN_BUS_DRONECAN, …)</code>.</p>
+
+<h2>fc_link_task.c (PCU)</h2>
+
+<h3>Static state</h3>
+<ul>
+  <li><code>s_canard</code> — libcanard instance</li>
+  <li><code>s_mem_pool[8192]</code> — libcanard heap (8 KB)</li>
+  <li><code>s_rx_q</code> — 64-deep CAN RX queue</li>
+  <li>Transfer-ID counters for NodeStatus + FlexDebug</li>
+  <li><code>s_fc_last_status_tick</code>, <code>s_boot_tick</code></li>
+</ul>
+
+<h3>Task loop @ 20 Hz (FC_LINK_PERIOD_MS = 50)</h3>
+<ol>
+  <li>Drain <code>s_rx_q</code> → <code>canardHandleRxFrame</code> (timestamp in µs).</li>
+  <li>Every 200 ms (5 Hz): <code>publish_flex_debug_batch()</code> — 19 fields.</li>
+  <li>Every 1000 ms (1 Hz): <code>publish_node_status(uptime)</code>.</li>
+  <li>If <code>s_fc_last_status_tick &gt; 0</code> and stale &gt; 1000 ms: <code>pt_set_fault(FAULT_FC_STALE)</code>.</li>
+  <li><code>drain_canard_tx()</code> → <code>can_mgr_send</code>.</li>
+  <li><code>canardCleanupStaleTransfers</code>.</li>
+</ol>
+
+<h3>should_accept() filter — admits only</h3>
+<table>
+  <tr><th>DTID</th><th>Type</th><th>Why</th></tr>
+  <tr><td><code>RawCommand</code> (1030)</td><td>broadcast</td><td>throttle feedforward</td></tr>
+  <tr><td><code>ActuatorArrayCommand</code> (1010)</td><td>broadcast</td><td>engine-state command (actuator_id = 8)</td></tr>
+  <tr><td><code>NodeStatus</code> (341)</td><td>broadcast</td><td>FC heartbeat</td></tr>
+  <tr><td><code>GetNodeInfo</code> (1)</td><td>request</td><td>discovery</td></tr>
+  <tr><td><code>param.GetSet</code> (11)</td><td>request</td><td>params idx 0 / 1</td></tr>
+</table>
+
+<h3>on_transfer_received() dispatch</h3>
+<table>
+  <tr><th>Source</th><th>What it does</th></tr>
+  <tr>
+    <td><code>RawCommand</code></td>
+    <td>Averages <code>cmd[0..len-1]</code>, clamps <code>[0..8191]</code>, scales to <code>0..10000</code> (0.01 %/LSB). Calls <code>pt_set_fc_inputs(mode = g_pcu_param_flight_state, throttle_pct)</code>.</td>
+  </tr>
+  <tr>
+    <td><code>ArrayCommand</code></td>
+    <td>Walks <code>commands[]</code>. For <code>actuator_id == 8</code>: maps UNITLESS &lt; −0.5 / &lt; +0.5 / ≥ +0.5 or PWM &lt; 1300 / &lt; 1700 / ≥ 1700 → <code>pt_request_engine_state(OFF / CRANK / RUN)</code>. Stores type+value in <code>g_fc_link_estate_cmd_*</code> globals for Live Watch.</td>
+  </tr>
+  <tr>
+    <td><code>NodeStatus</code></td>
+    <td><code>s_fc_last_status_tick = now</code>; <code>pt_clear_fault(FAULT_FC_STALE)</code>.</td>
+  </tr>
+  <tr>
+    <td><code>GetNodeInfo</code> req</td>
+    <td>Builds response: name = <code>lat.pcu</code>, sw/hw v1.0, <code>vendor_status_code = pt_get_faults()</code>, UID from <code>0x1FFF7A10</code>. <code>canardRequestOrRespond</code> at priority MEDIUM.</td>
+  </tr>
+  <tr>
+    <td><code>param.GetSet</code> req</td>
+    <td>Matches name or index. <code>flight_state</code> idx 0 writes <code>g_pcu_param_flight_state</code>. <code>engine_state</code> idx 1 routes through <code>pt_request_engine_state()</code> (so swap+prime still fires). Response priority HIGH; default/min/max EMPTY to keep response short.</td>
+  </tr>
+</table>
+
+<h3>Publishers</h3>
+<table>
+  <tr><th>Publisher</th><th>Cadence</th><th>Payload</th></tr>
+  <tr><td><code>publish_node_status(uptime)</code></td><td>1 Hz</td><td>uptime_sec, health = OK, mode = OPERATIONAL, <code>vendor_specific_status_code = pt_get_faults()</code></td></tr>
+  <tr><td><code>publish_flex_debug_batch()</code></td><td>5 Hz × 19 fields</td><td>Per field: <code>dronecan.protocol.FlexDebug</code> (DTID 16371, signature <code>0xECA60382FF038F39</code>), hand-rolled encoder (<code>uint16 id LE + 4-byte float32 TAO</code>), single-frame, priority LOW.</td></tr>
+</table>
+
+<h3>FlexDebug field set (current code)</h3>
+<table>
+  <tr><th>ID</th><th>Name</th><th>g_pt source</th><th>Live?</th></tr>
+  <tr><td>1</td><td>DUT</td><td><code>ctl.duty_x10000 / 100</code></td><td>fixed-setpoint mirror in RUN only</td></tr>
+  <tr><td>2</td><td>THR</td><td><code>engine_throttle.applied_pct_x100 / 100</code></td><td>every tick</td></tr>
+  <tr><td>3</td><td>IRS</td><td><code>rect_cmd.I_cmd_cA / 100</code></td><td>0 (we use DUTY mode)</td></tr>
+  <tr><td>4</td><td>IRM</td><td><code>rect.state.I_dc_cA / 100</code></td><td>VESC 0x201</td></tr>
+  <tr><td>5</td><td>VDC</td><td><code>rect.state.V_dc_cV / 100</code></td><td>VESC 0x201</td></tr>
+  <tr><td>6</td><td>IBF</td><td><code>ctl.i_bat_filt_cA / 100</code></td><td>stale, V1 off</td></tr>
+  <tr><td>7</td><td>IBR</td><td><code>ctl.i_bat_ref_eff_cA / 100</code></td><td>stale, V1 off</td></tr>
+  <tr><td>8</td><td>RPM</td><td><code>rect.state.gen_rpm</code></td><td>VESC 0x201 (electrical)</td></tr>
+  <tr><td>9</td><td>IGT</td><td><code>rect.state.igbt_temp_C</code></td><td>VESC 0x201</td></tr>
+  <tr><td>10</td><td>PRC</td><td><code>ctl.p_rect_W</code></td><td>stale, V1 off</td></tr>
+  <tr><td>11</td><td>EST</td><td><code>engine.state</code></td><td>live</td></tr>
+  <tr><td>12</td><td>FLT</td><td><code>fault_bits</code></td><td>live</td></tr>
+  <tr><td>13</td><td>ENG</td><td><code>ecu.rpm</code></td><td>MegaSquirt poll</td></tr>
+  <tr><td>14</td><td>TC0</td><td><code>tc.C[0]</code></td><td>MAX31855</td></tr>
+  <tr><td>15</td><td>TC1</td><td><code>tc.C[1]</code></td><td>MAX31855</td></tr>
+  <tr><td>16</td><td>AC2</td><td><code>acs.mA[2] / 1000</code></td><td>ACS ch 2 (battery)</td></tr>
+  <tr><td>17</td><td>AC1</td><td><code>acs.mA[1] / 1000</code></td><td>ACS ch 1</td></tr>
+  <tr><td>18</td><td>DUA</td><td><code>rect.state_ext.duty_x10000 / 100</code></td><td>VESC 0x202 (zero until VESC firmware ships encoder)</td></tr>
+  <tr><td>19</td><td>HB</td><td><code>supervisor_heartbeat</code></td><td>supervisor sanity counter</td></tr>
+</table>
+
+<h3>Faults touched here</h3>
+<ul>
+  <li><b>Set:</b> <code>FAULT_FC_STALE</code> (when NodeStatus stale &gt; 1 s).</li>
+  <li><b>Cleared:</b> <code>FAULT_FC_STALE</code> (on every NodeStatus RX from FC).</li>
+</ul>
+
+<h3>Diagnostic globals (Live Watch only)</h3>
+<p><code>g_fc_link_rx_nodestatus</code>, <code>g_fc_link_rx_rawcommand</code>, <code>g_fc_link_rx_arraycommand</code>, <code>g_fc_link_rx_total</code>, <code>g_fc_link_estate_cmd_type</code>, <code>g_fc_link_estate_cmd_value</code>, plus the <code>g_pcu_param_*</code> GetSet counters.</p>
+
+<h2>scripts/pcu_telem.lua (FC, downlink)</h2>
+
+<p>One Lua function <code>update()</code> running every 200 ms (5 Hz). For each of the 19 IDs in the <code>FIELDS</code> table:</p>
+
+<ol>
+  <li><code>ts, buf = DroneCAN_get_FlexDebug(BUS=0, NODE=50, flex_id, last_us[flex_id])</code></li>
+  <li>If <code>ts</code> is fresh and <code>#buf &gt;= 4</code>:
+    <ul>
+      <li><code>last_us[flex_id] = ts</code></li>
+      <li><code>value = string.unpack("&lt;f", buf)</code> — LE float32</li>
+      <li><code>gcs:send_named_float(name, value)</code> → MAVLink <code>NAMED_VALUE_FLOAT</code> → MP Tuning view as <code>MAV_&lt;name&gt;</code>, captured in <code>.tlog</code></li>
+      <li><code>logger:write("PCU", "Name,Value", "Nf", name, value)</code> → SD-card BIN log row</li>
+    </ul>
+  </li>
+</ol>
+
+<p>Banner on script load. No state besides <code>last_us[]</code>.</p>
+
+<p><b>Requires FC params:</b> <code>SCR_ENABLE = 1</code>, <b><code>CAN_D1_UC_OPTION |= 512</code></b> (<code>ENABLE_FLEX_DEBUG</code>) — without this AP's FlexDebug cache stays empty.</p>
+
+<h2>scripts/pcu_engine_rc.lua (FC, uplink)</h2>
+
+<p><code>update()</code> every 100 ms (10 Hz):</p>
+
+<ol>
+  <li><code>pwm = rc:get_pwm(RC_CHANNEL = 7)</code></li>
+  <li>Classify: <code>&lt; 1300</code> → OFF (out = 1000), <code>&lt; 1700</code> → CRANK (out = 1500), else RUN (out = 2000)</li>
+  <li><code>SRV_Channels:set_output_pwm_chan_timeout(SERVO_CHAN_0 = 7, out, OVERRIDE_MS = 250)</code> — writes SERVO8 with 250 ms safety timeout (channel reverts if script dies).</li>
+  <li>AP serialises SERVO8 into <code>uavcan.equipment.actuator.ArrayCommand</code> because SERVO8 is in <code>CAN_D1_UC_SRV_BM</code>. Default <code>command_type = UNITLESS</code>, value = <code>(pulse-1000)/500 - 1</code> (so 1000 → −1, 1500 → 0, 2000 → +1).</li>
+  <li>On state change: STATUSTEXT line.</li>
+</ol>
+
+<p><b>Required FC params:</b> <code>SERVO8_FUNCTION = 94</code> (Scripting1), <code>SERVO8_MIN = 1000</code>, <code>SERVO8_MAX = 2000</code>, <code>CAN_D1_UC_SRV_BM |= 128</code>, <b>NOT</b> in <code>CAN_D1_UC_ESC_BM</code> (that path is motor-arming-gated).</p>
+
+<h2>Path summary (one line per direction)</h2>
+
+<p><b>Downlink (PCU → MP):</b><br>
+<code>g_pt</code> → <code>publish_flex_debug_batch</code> → 5 Hz FlexDebug (DTID 16371) → AP <code>AP_DroneCAN::handle_FlexDebug</code> (gated by <code>ENABLE_FLEX_DEBUG</code>) → cache → <code>pcu_telem.lua</code> polling → <code>gcs:send_named_float</code> → MP Tuning + tlog + dataflash <code>PCU</code> rows.</p>
+
+<p><b>Uplink — engine state (RC → PCU):</b><br>
+RC7 → <code>pcu_engine_rc.lua</code> → <code>SRV_Channels:set_output_pwm_chan_timeout(SERVO8, …)</code> → AP DroneCAN actuator bridge → <code>ArrayCommand</code> (actuator_id = 8) → <code>fc_link_task.on_transfer_received</code> → <code>pt_request_engine_state()</code> → supervisor (pre-flight gate, then OFF / CRANK direct, RUN via swap+prime).</p>
+
+<p><b>Uplink — throttle (FC mixer → PCU):</b><br>
+AP motor mixer → ESC <code>RawCommand</code> (all motor channels, motor-arming-gated) → <code>fc_link_task.on_transfer_received</code> → averaged → <code>pt_set_fc_inputs(mode, throttle_pct)</code>.</p>
+
+<p><b>Uplink — param (MP / GUI Tool → PCU):</b><br>
+MP "Configure Parameters" → <code>param.GetSet</code> request → <code>fc_link_task.handle_param_get_set</code> → <code>pt_request_engine_state()</code> (for engine_state) or <code>g_pcu_param_flight_state</code> write (for flight_state).</p>
+
+</body>
+</html>

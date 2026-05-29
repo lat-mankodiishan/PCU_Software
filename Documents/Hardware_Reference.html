@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PCU hardware — pin reference</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; max-width: 1000px; margin: 2em auto; line-height: 1.45; color: #222; }
+  h1 { font-size: 1.7em; border-bottom: 2px solid #555; padding-bottom: 0.2em; }
+  h2 { font-size: 1.25em; border-bottom: 1px solid #aaa; padding-bottom: 0.15em; margin-top: 1.4em; }
+  code { font-family: Consolas, "Courier New", monospace; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.95em; }
+  table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+  th, td { border: 1px solid #888; padding: 4px 8px; text-align: left; vertical-align: top; }
+  th { background: #e8e8e8; }
+  ul { margin: 0.4em 0; padding-left: 1.4em; }
+  li { margin: 0.15em 0; }
+  .small { color: #555; font-size: 0.9em; }
+</style>
+</head>
+<body>
+
+<h1>PCU hardware — pin reference</h1>
+
+<p><b>MCU:</b> STM32F405RGT (LQFP64). Source clock: HSI 16 MHz → PLL → SYSCLK / HCLK 40 MHz, APB1 = APB2 = 20 MHz. Single supply, 3.3 V logic.</p>
+
+<h2>1. External buses</h2>
+
+<table>
+  <tr><th>Bus</th><th>Pins (AF)</th><th>Rate / config</th><th>Connects to</th></tr>
+  <tr><td>CAN1 (DroneCAN)</td><td>PB8 = CAN1_RX, PB9 = CAN1_TX (AF9)</td><td>1 Mbps; Prescaler=2, BS1=8, BS2=1, SJW=1; sample 90 %. <code>TransmitFifoPriority=ENABLE</code>, <code>AutoBusOff=ENABLE</code>, <code>AutoRetransmission=ENABLE</code>.</td><td>Cube Orange+ (node 10), GPS, DroneCAN GUI Tool. PCU node 50.</td></tr>
+  <tr><td>CAN2 (engine bus)</td><td>PB12 = CAN2_RX, PB13 = CAN2_TX (AF9)</td><td>250 kbps; Prescaler=8, BS1=8, BS2=1.</td><td>VESC rectifier (0x101–0x105 cmd, 0x201/0x202 telem).</td></tr>
+  <tr><td>USART2 (ECU)</td><td>PA2 = USART2_TX, PA3 = USART2_RX (AF7)</td><td>115200 8N1, DMA RX. PA3 with <b>GPIO_PULLUP</b> (overrides CubeMX <code>NOPULL</code>).</td><td>Loweheiser ECU MegaSquirt 'A' poll, 212-byte ochBlock.</td></tr>
+  <tr><td>SPI1 (SD card)</td><td>PA5 = SCK, PB4 = MISO, PB5 = MOSI; PB6 = <code>CS_SD</code> (GPIO)</td><td>FATFS over SPI. CS asserted by FATFS_SD driver.</td><td>SD card. Tick-hook decrements FATFS Timer1/Timer2 each ms.</td></tr>
+  <tr><td>SPI2 (thermocouples)</td><td>PB10 = SCK, PB14 = MISO, PB15 = MOSI</td><td>3 separate CS lines, one transaction per channel.</td><td>3× MAX31855 K-type thermocouples. CS = PC6, PC7, PC8 (<code>CS_TC1/2/3</code>).</td></tr>
+  <tr><td>SPI3 (ADC)</td><td>PC10 = SCK, PC11 = MISO, PC12 = MOSI; PD2 = <code>CS_ADC</code></td><td>ADS1262 24-bit ADC. Sinc4 filter; SPS / PGA per channel config in <code>sensor_task.c</code>.</td><td>ADS1262 → AIN0/1/2 wired to 3× ACS772ECB-300B current sensors.</td></tr>
+</table>
+
+<h2>2. Timers / PWM</h2>
+
+<table>
+  <tr><th>Pin (AF)</th><th>Timer / channel</th><th>Output</th></tr>
+  <tr><td>PA8 (AF1)</td><td>TIM1_CH1</td><td>Engine throttle ESC PWM, 1 µs tick, 20 ms frame (50 Hz). Active range <b>1667–2879 µs</b> (5/3.3 scaled for 5 V PWM-as-DAC servo).</td></tr>
+  <tr><td>PA9 (AF1)</td><td>TIM1_CH2</td><td>Reserved (channel configured in <code>.ioc</code> but not used by current firmware — <code>esc_channel_t</code> only enumerates CH1 and CH3).</td></tr>
+  <tr><td>PA10 (AF1)</td><td>TIM1_CH3</td><td>Load ESC PWM, 1000–2000 µs (bench dyno only).</td></tr>
+</table>
+
+<h2>3. GPIO map</h2>
+
+<table>
+  <tr><th>Pin</th><th>Direction</th><th>Label / role</th><th>Driven by</th></tr>
+  <tr><td>PA7</td><td>Input</td><td>Engine-run bench switch (rising edge fires CRANK→RUN swap in supervisor)</td><td>External switch → polled by supervisor_task</td></tr>
+  <tr><td>PB2</td><td>Output</td><td><code>LED</code> heartbeat — 500 ms toggle</td><td><code>vApplicationIdleHook</code> (FreeRTOS idle)</td></tr>
+  <tr><td>PB11</td><td>Output</td><td><code>PDB_BAT</code> — battery contactor command (HIGH = closed)</td><td><code>pdb_hw_write()</code> via pdb_task at 50 Hz</td></tr>
+  <tr><td>PC15</td><td>Output</td><td><code>PDB_RECT</code> — rectifier contactor command (HIGH = closed)</td><td><code>pdb_hw_write()</code> via pdb_task at 50 Hz</td></tr>
+  <tr><td>PC1</td><td>Output</td><td><code>ADC_START</code> — ADS1262 START pin</td><td><code>ads1262.c</code></td></tr>
+  <tr><td>PC5</td><td>EXTI input</td><td><code>ADC_DRDY</code> — ADS1262 data-ready, EXTI9_5</td><td>HAL_GPIO_EXTI_Callback → <code>ADC_DRDY_IRQ()</code> → sensor_task</td></tr>
+  <tr><td>PC13</td><td>Output</td><td><code>ADC_RST</code> — ADS1262 reset (pulse low 1 ms at init)</td><td><code>ads1262.c::ADC_Reset</code></td></tr>
+  <tr><td>PC3</td><td>Output</td><td>Precharge latch / startup pulse (HIGH for 1 s at boot, then LOW)</td><td>defaultTask one-shot</td></tr>
+  <tr><td>PC0 / PC2</td><td>Output</td><td>Configured as GPIO output but unlabeled in <code>.ioc</code> — unused by current firmware</td><td>—</td></tr>
+  <tr><td>PB6</td><td>Output</td><td><code>CS_SD</code></td><td>FATFS_SD</td></tr>
+  <tr><td>PC6 / PC7 / PC8</td><td>Output</td><td><code>CS_TC1</code> / <code>CS_TC2</code> / <code>CS_TC3</code> — MAX31855 chip selects</td><td><code>max31855.c::MAX_ReadSPI</code></td></tr>
+  <tr><td>PD2</td><td>Output</td><td><code>CS_ADC</code></td><td><code>ads1262.c</code></td></tr>
+  <tr><td>PA4</td><td>Analog</td><td>DAC1 OUT (channel 1)</td><td>Currently inert; <code>MX_DAC_Init</code> only — no application use</td></tr>
+</table>
+
+<h2>4. Debug / programming</h2>
+
+<table>
+  <tr><th>Pin</th><th>Function</th></tr>
+  <tr><td>PA13</td><td>SWDIO (ST-LINK)</td></tr>
+  <tr><td>PA14</td><td>SWCLK (ST-LINK)</td></tr>
+  <tr><td>PB3</td><td>SWO — used by <code>printf</code> via <code>swo_io.c</code> and by rtos_stats periodic dump</td></tr>
+</table>
+
+<h2>5. Watchdog</h2>
+
+<ul>
+  <li><b>IWDG:</b> independent watchdog on LSI (~32 kHz). Prescaler = 8 → counter = 4 kHz; Reload = 4095 → <b>≈ 1.0 s timeout</b>.</li>
+  <li>Refreshed by <code>supervisor_task</code> every 200 ms via <code>watchdog_refresh()</code> → 5× margin.</li>
+  <li><code>__HAL_DBGMCU_FREEZE_IWDG()</code> is <i>commented out</i> in <code>main.c</code> — IWDG keeps counting while the debugger is paused. Be aware during JTAG single-step.</li>
+</ul>
+
+<h2>6. Sensor wiring summary</h2>
+
+<table>
+  <tr><th>Sensor</th><th>Channel mapping</th><th>Scaling</th></tr>
+  <tr><td>ACS772ECB-300B (×3)</td><td>ADS1262 AIN0 / AIN1 / AIN2 → <code>g_pt.acs.mA[0..2]</code>. Ch 2 is V1's <code>I_bat</code> input.</td><td><code>ACS772_SCALE_MA = 5 V / 2^31 / 0.00666 V/A × 1000</code>; <code>OFFSET_MA = -2.5 V / 0.00666 × 1000</code>. AINCOM bodged to GND, PGA bypassed, AVDD reference.</td></tr>
+  <tr><td>MAX31855 K-type (×3)</td><td>SPI2 with per-channel CS on PC6/7/8 → <code>g_pt.tc.C[0..2]</code> + <code>tc.valid[0..2]</code>.</td><td>32-bit raw → integer °C via <code>MAX_GetData</code>. Validity flag clears if open-circuit / fault bits in raw word are set.</td></tr>
+</table>
+
+<h2>7. Power / contactor signal flow</h2>
+
+<p class="small">Hardware-side specifics depend on PDB schematic; this is the firmware-visible chain.</p>
+
+<table>
+  <tr><th>Step</th><th>Signal</th><th>Note</th></tr>
+  <tr><td>Boot</td><td>PC3 HIGH (1 s) → LOW</td><td>defaultTask one-shot. Acts as a precharge latch / external supervision signal — the PDB AND-gates contactor enables with this pulse.</td></tr>
+  <tr><td>Tick</td><td><code>supervisor</code> writes <code>g_pt.contactor_cmd.battery</code> + <code>.rectifier</code></td><td>Policy: battery closed unless <code>engine_state == FAULT</code>; rectifier closed unless <code>FAULT</code> or any DEGRADE-or-worse fault.</td></tr>
+  <tr><td>50 Hz</td><td><code>pdb_task</code> reads cmds, calls <code>pdb_hw_write(bat, rect)</code></td><td>Sets PB11 + PC15 HIGH/LOW. <b>Hold-last-state</b> if supervisor heartbeat stale &gt; 1 s.</td></tr>
+</table>
+
+<h2>8. Quick connector / function map</h2>
+
+<table>
+  <tr><th>Function</th><th>Pin(s)</th></tr>
+  <tr><td>DroneCAN to Pixhawk</td><td>PB8 / PB9 (+ GND, +5 V if powering transceiver)</td></tr>
+  <tr><td>VESC link</td><td>PB12 / PB13</td></tr>
+  <tr><td>ECU UART</td><td>PA2 (TX, PCU→ECU), PA3 (RX, ECU→PCU)</td></tr>
+  <tr><td>Engine throttle servo</td><td>PA8 PWM signal (servo also needs 5 V + GND)</td></tr>
+  <tr><td>Bench load ESC</td><td>PA10 PWM</td></tr>
+  <tr><td>Battery contactor coil</td><td>PB11 (HIGH = close)</td></tr>
+  <tr><td>Rectifier contactor coil</td><td>PC15 (HIGH = close)</td></tr>
+  <tr><td>Precharge latch / supervision</td><td>PC3 (1 s HIGH at boot)</td></tr>
+  <tr><td>Engine-run bench switch</td><td>PA7 (rising edge triggers CRANK→RUN)</td></tr>
+  <tr><td>SD card</td><td>PA5 SCK, PB4 MISO, PB5 MOSI, PB6 CS</td></tr>
+  <tr><td>Thermocouples</td><td>PB10 SCK, PB14 MISO, PB15 MOSI; CS = PC6 / PC7 / PC8</td></tr>
+  <tr><td>Current ADC</td><td>PC10/11/12 SPI3, PD2 CS, PC1 START, PC5 DRDY, PC13 RST</td></tr>
+  <tr><td>LED heartbeat</td><td>PB2</td></tr>
+  <tr><td>Debug (ST-LINK)</td><td>PA13 SWDIO, PA14 SWCLK, PB3 SWO</td></tr>
+</table>
+
+</body>
+</html>

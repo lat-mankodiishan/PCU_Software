@@ -14,10 +14,16 @@
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[512];    /* 2 KB */
 
+/* Owned by fc_link_task; latched on first Fix2 frame with a real GPS time. */
+extern volatile uint64_t g_utc_base_usec;
+extern volatile uint32_t g_utc_base_tick;
+
+#define LOG_GPS_WAIT_MS  3000u   /* Spin in pick_filename up to this long for first fix. */
+
 static FATFS    s_fs;
 static FIL      s_file;
 static char     s_line[512];
-static char     s_filename[16];
+static char     s_filename[32];  /* roomy for LOG_YYYYMMDD_HHMMSS.CSV */
 static bool     s_mounted = false;
 static uint32_t s_writes_since_sync = 0;
 
@@ -35,8 +41,62 @@ void log_task_start(void) {
     osThreadNew(log_task, NULL, &tattr);
 }
 
-/* Find next available LOGNNNN.CSV; fall back to LOG.CSV if all used. */
+/* Hand-rolled Unix epoch → calendar (no newlib gmtime_r dependency).
+ * Accurate for years 1970..2099. */
+static void epoch_to_ymdhms(uint64_t epoch_sec,
+                            uint16_t *Y, uint8_t *M, uint8_t *D,
+                            uint8_t *h, uint8_t *m, uint8_t *s) {
+    uint32_t day_secs = (uint32_t)(epoch_sec % 86400u);
+    uint64_t days     = epoch_sec / 86400u;
+    *h = (uint8_t)(day_secs / 3600u);
+    *m = (uint8_t)((day_secs / 60u) % 60u);
+    *s = (uint8_t)(day_secs % 60u);
+
+    uint16_t year = 1970;
+    for (;;) {
+        bool leap = ((year % 4u) == 0u && (year % 100u) != 0u) || ((year % 400u) == 0u);
+        uint32_t year_days = leap ? 366u : 365u;
+        if (days < year_days) break;
+        days -= year_days;
+        year++;
+    }
+    *Y = year;
+
+    static const uint8_t mday[12] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+    bool leap = ((year % 4u) == 0u && (year % 100u) != 0u) || ((year % 400u) == 0u);
+    uint8_t month = 0;
+    while (1) {
+        uint8_t dim = (month == 1 && leap) ? 29u : mday[month];
+        if (days < dim) break;
+        days -= dim;
+        month++;
+    }
+    *M = (uint8_t)(month + 1u);
+    *D = (uint8_t)(days  + 1u);
+}
+
+/* LOG_YYYYMMDD_HHMMSS.CSV when GPS time is available (waits up to LOG_GPS_WAIT_MS);
+ * falls back to LOGNNNN.CSV (next free index) otherwise. */
 static void pick_filename(void) {
+    uint32_t t_start = osKernelGetTickCount();
+    while (g_utc_base_usec == 0u
+           && (osKernelGetTickCount() - t_start) < LOG_GPS_WAIT_MS) {
+        osDelay(100);
+    }
+
+    if (g_utc_base_usec != 0u) {
+        uint64_t now_usec = g_utc_base_usec
+            + ((uint64_t)(osKernelGetTickCount() - g_utc_base_tick) * 1000ull);
+        uint64_t epoch_sec = now_usec / 1000000ull;
+        uint16_t Y; uint8_t M, D, h, m, s;
+        epoch_to_ymdhms(epoch_sec, &Y, &M, &D, &h, &m, &s);
+        snprintf(s_filename, sizeof(s_filename),
+                 "LOG_%04u%02u%02u_%02u%02u%02u.CSV",
+                 Y, M, D, h, m, s);
+        return;
+    }
+
+    /* GPS never showed up — fall back to monotonic index. */
     for (int i = 0; i < 10000; ++i) {
         snprintf(s_filename, sizeof(s_filename), "LOG%04d.CSV", i);
         FILINFO fno;

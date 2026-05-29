@@ -16,6 +16,7 @@
 #include "uavcan.equipment.esc.RawCommand.h"
 #include "uavcan.equipment.actuator.ArrayCommand.h"
 #include "uavcan.equipment.actuator.Command.h"
+#include "uavcan.equipment.gnss.Fix2.h"
 #include "uavcan.protocol.param.GetSet_req.h"
 #include "uavcan.protocol.param.GetSet_res.h"
 #include "uavcan.protocol.param.Value.h"
@@ -106,7 +107,13 @@ static uint32_t           s_boot_tick           = 0;
 volatile uint32_t g_fc_link_rx_nodestatus    = 0;
 volatile uint32_t g_fc_link_rx_rawcommand    = 0;
 volatile uint32_t g_fc_link_rx_arraycommand  = 0;
+volatile uint32_t g_fc_link_rx_fix2          = 0;
 volatile uint32_t g_fc_link_rx_total         = 0;
+
+/* UTC anchor latched on first GPS-fix Fix2 frame; consumed by log_task to
+ * stamp the log filename. Zero means "no fix yet, fall back to LOGNNNN.CSV". */
+volatile uint64_t g_utc_base_usec = 0;
+volatile uint32_t g_utc_base_tick = 0;
 
 /* DEBUG: last engine-state command value seen on actuator_id 8 (for bench tuning
  * the band thresholds). type=0 unitless, type=4 PWM us. */
@@ -138,6 +145,10 @@ static bool should_accept(const CanardInstance *ins,
         }
         if (data_type_id == UAVCAN_EQUIPMENT_ACTUATOR_ARRAYCOMMAND_ID) {
             *out_signature = UAVCAN_EQUIPMENT_ACTUATOR_ARRAYCOMMAND_SIGNATURE;
+            return true;
+        }
+        if (data_type_id == UAVCAN_EQUIPMENT_GNSS_FIX2_ID) {
+            *out_signature = UAVCAN_EQUIPMENT_GNSS_FIX2_SIGNATURE;
             return true;
         }
         if (data_type_id == UAVCAN_PROTOCOL_NODESTATUS_ID) {
@@ -368,6 +379,21 @@ static void on_transfer_received(CanardInstance    *ins,
                 }
                 pt_request_engine_state(req);
                 break;
+            }
+        }
+    }
+    else if (transfer->data_type_id == UAVCAN_EQUIPMENT_GNSS_FIX2_ID) {
+        g_fc_link_rx_fix2++;
+        /* Latch UTC anchor once. gnss_time_standard != 0 means GPS has a fix
+         * and the timestamp scale is known (UTC=2, GPS=3 — both fine for
+         * file-naming resolution). */
+        if (g_utc_base_usec == 0u) {
+            struct uavcan_equipment_gnss_Fix2 msg;
+            if (!uavcan_equipment_gnss_Fix2_decode(transfer, &msg)
+                && msg.gnss_timestamp.usec != 0u
+                && msg.gnss_time_standard  != 0u) {
+                g_utc_base_tick = osKernelGetTickCount();
+                g_utc_base_usec = msg.gnss_timestamp.usec;
             }
         }
     }

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pdb_task — code reference</title>
+<style>
+  body { font-family: Calibri, Arial, sans-serif; max-width: 900px; margin: 2em auto; line-height: 1.45; color: #222; }
+  h1 { font-size: 1.8em; border-bottom: 2px solid #555; padding-bottom: 0.2em; }
+  h2 { font-size: 1.25em; border-bottom: 1px solid #aaa; padding-bottom: 0.15em; margin-top: 1.4em; }
+  code { font-family: Consolas, "Courier New", monospace; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.95em; }
+  table { border-collapse: collapse; margin: 0.5em 0; width: 100%; }
+  th, td { border: 1px solid #888; padding: 4px 8px; text-align: left; vertical-align: top; }
+  th { background: #e8e8e8; }
+  ul, ol { margin: 0.4em 0; padding-left: 1.4em; }
+  li { margin: 0.15em 0; }
+</style>
+</head>
+<body>
+
+<h1>pdb_task — current code reference</h1>
+
+<p><b>Role.</b> Bridges <code>g_pt.contactor_cmd</code> to the physical contactor GPIOs, gated by a supervisor heartbeat watchdog. Single watchdog consumer for the supervisor task — no other code raises <code>FAULT_SUPERVISOR_HANG</code>.</p>
+
+<h2>Config</h2>
+<table>
+  <tr><th>Define</th><th>Value</th><th>Purpose</th></tr>
+  <tr><td><code>PDB_PERIOD_MS</code></td><td>20</td><td>50 Hz loop</td></tr>
+  <tr><td><code>PDB_SUP_HANG_MS</code></td><td>1000</td><td>5× margin on 200 ms supervisor refresh; trip threshold</td></tr>
+</table>
+
+<p>Task priority <code>osPriorityAboveNormal</code> (4), stack 256 words (1 KB).</p>
+
+<h2>Internal state</h2>
+<ul>
+  <li><code>last_heartbeat</code> — last seen <code>g_pt.supervisor_heartbeat</code> value</li>
+  <li><code>last_progress_tick</code> — kernel tick at last heartbeat change</li>
+  <li><code>supervisor_alive</code> — gate flag; false at boot, latches true on first heartbeat advance</li>
+</ul>
+
+<h2>Loop @ 50 Hz</h2>
+<ol>
+  <li>Snapshot <code>supervisor_heartbeat</code>, <code>contactor_cmd.battery</code>, <code>contactor_cmd.rectifier</code> under <code>g_pt_mtx</code>.</li>
+  <li>If heartbeat changed → update <code>last_progress_tick</code>, set <code>supervisor_alive = true</code>, <code>pt_clear_fault(FAULT_SUPERVISOR_HANG)</code>.</li>
+  <li>Else if <code>supervisor_alive</code> and stale &gt; 1000 ms → <code>supervisor_alive = false</code>, <code>pt_set_fault(FAULT_SUPERVISOR_HANG)</code>.</li>
+  <li>If <code>supervisor_alive</code>: <code>pdb_hw_write(bat_cmd, rect_cmd)</code>. Otherwise <b>hold last GPIO state</b> — never open mid-flight.</li>
+  <li><code>osDelayUntil(next)</code>.</li>
+</ol>
+
+<h2>Boot behaviour</h2>
+<p>GPIO reset state is low = contactors open. <code>supervisor_alive</code> starts false, so the task does not write GPIOs until it has observed at least one heartbeat advance from a running supervisor. <code>defaultTask</code> separately pulses PC3 high for 1 s at boot (precharge latch / startup signal).</p>
+
+<h2>Faults touched</h2>
+<table>
+  <tr><th>Fault</th><th>Set when</th><th>Cleared when</th></tr>
+  <tr><td><code>FAULT_SUPERVISOR_HANG</code></td><td>Heartbeat unchanged for &gt; 1 s after first valid heartbeat</td><td>Next heartbeat advance</td></tr>
+</table>
+
+<h2>Path summary</h2>
+<p>supervisor (every tick: <code>g_pt.supervisor_heartbeat++</code> + writes <code>contactor_cmd</code>) → pdb_task (50 Hz: validates heartbeat + mirrors cmd) → <code>pdb_hw_write</code> → physical battery + rectifier contactor GPIOs.</p>
+
+</body>
+</html>
