@@ -122,7 +122,7 @@ static void log_task(void *arg) {
            "V_dc_cV,I_dc_cA,gen_rpm,igbt_C,rect_fault,rect_seq,rect_tick,"
            "duty_act,Iq_cA,Id_cA,vrun,vmt_echo,ext_tick,"
            "fc_state,fc_thr_pct,fc_tick,"
-           "ecu_rpm,ecu_estat,ecu_tick,"
+    	   "ecu_rpm,ecu_tps_x10,ecu_estat,ecu_tick,"
            "eng_state,eng_state_tick,"
            "ctl_i_bat_filt,ctl_i_bat_ref,ctl_i_rect_dem,ctl_p_rect_W,ctl_duty,ctl_theta,"
            "sup_hb,ct_bat,ct_rect,"
@@ -150,7 +150,7 @@ static void log_task(void *arg) {
             "%u,%d,%u,%d,%u,%u,%lu,"
             "%d,%d,%d,%u,%u,%lu,"
             "%u,%u,%lu,"
-            "%u,%u,%lu,"
+            "%u,%d,%u,%lu,"
             "%u,%lu,"
             "%d,%d,%d,%lu,%u,%u,"
             "%lu,%u,%u,"
@@ -170,6 +170,7 @@ static void log_task(void *arg) {
             (unsigned)pt.fc.flight_state, pt.fc.throttle_dem_pct,
             (unsigned long)pt.fc.tick,
             pt.ecu.rpm,
+			pt.ecu.tps_pct_x10,
             (unsigned)pt.ecu.engine_status,
             (unsigned long)pt.ecu.tick,
             (unsigned)pt.engine.state,
