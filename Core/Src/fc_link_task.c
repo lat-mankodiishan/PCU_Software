@@ -32,7 +32,7 @@
 #define FC_LINK_PERIOD_MS         50            /* 20 Hz */
 #define FC_LINK_HEARTBEAT_MS    1000            /* 1 Hz NodeStatus */
 #define FC_LINK_FLEX_PERIOD_MS   200            /*  5 Hz FlexDebug batch */
-#define FC_LINK_FC_STALE_MS     1000
+#define FC_LINK_FC_STALE_MS     2500            /* any FC RX within this = link alive */
 
 /* dronecan.protocol.FlexDebug — DTID 16371, single-frame float32 per id.
  * AP needs CAN_D1_UC_OPTION |= 512 (ENABLE_FLEX_DEBUG) to cache for Lua. */
@@ -100,7 +100,7 @@ static CanardInstance     s_canard;
 static uint8_t            s_tid_status = 0;
 static uint8_t            s_tid_flex   = 0;
 
-static volatile uint32_t  s_fc_last_status_tick = 0;
+static volatile uint32_t  s_fc_last_rx_tick = 0;   /* stamped on any received transfer */
 static uint32_t           s_boot_tick           = 0;
 
 /* DEBUG: per-DTID receive counters. */
@@ -318,6 +318,7 @@ static void on_transfer_received(CanardInstance    *ins,
     (void)ins;
 
     g_fc_link_rx_total++;
+    s_fc_last_rx_tick = osKernelGetTickCount();   /* any FC traffic = link alive */
 
     if (transfer->transfer_type == CanardTransferTypeRequest) {
         if (transfer->data_type_id == UAVCAN_PROTOCOL_GETNODEINFO_REQUEST_ID) {
@@ -398,9 +399,7 @@ static void on_transfer_received(CanardInstance    *ins,
         }
     }
     else if (transfer->data_type_id == UAVCAN_PROTOCOL_NODESTATUS_ID) {
-        g_fc_link_rx_nodestatus++;
-        s_fc_last_status_tick = osKernelGetTickCount();
-        pt_clear_fault(FAULT_FC_STALE);
+        g_fc_link_rx_nodestatus++;   /* counter only; liveness keyed off any RX */
     }
 }
 
@@ -510,6 +509,7 @@ static void fc_link_task(void *arg) {
     uint32_t last_flex_tx   = s_boot_tick;
     uint32_t last_status_tx = s_boot_tick;
     uint32_t next           = s_boot_tick;
+    s_fc_last_rx_tick       = s_boot_tick;   /* don't flag stale until 2.5 s of silence */
 
     for (;;) {
         uint32_t now = osKernelGetTickCount();
@@ -536,9 +536,11 @@ static void fc_link_task(void *arg) {
             last_status_tx = now;
         }
 
-        if (s_fc_last_status_tick &&
-            (now - s_fc_last_status_tick) > FC_LINK_FC_STALE_MS) {
+        /* Fresh tick read so it's always >= the stamp (no unsigned underflow). */
+        if ((osKernelGetTickCount() - s_fc_last_rx_tick) > FC_LINK_FC_STALE_MS) {
             pt_set_fault(FAULT_FC_STALE);
+        } else {
+            pt_clear_fault(FAULT_FC_STALE);
         }
 
         drain_canard_tx();
