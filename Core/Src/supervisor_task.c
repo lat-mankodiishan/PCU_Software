@@ -22,7 +22,7 @@
 /* Flip to 1 to put V1 controller back on the wire during ENGINE_RUN. */
 #define RUN_USE_V1_CONTROLLER    0
 #define RUN_DUTY_X10000          7500      /* 75.00 % fixed FOC duty in RUN */
-#define RUN_THROTTLE_PCT_X100    6000      /* 60.00 % fixed engine throttle in RUN */
+#define RUN_THROTTLE_PCT_X100    6500      /* 60.00 % fixed engine throttle in RUN */
 
 /* Fault detection thresholds (supervisor-owned faults). */
 #define FC_THROTTLE_STALE_MS         2500u
@@ -88,6 +88,32 @@ typedef enum {
     SWAP_PRIME = 3,
 } swap_phase_t;
 
+/* Staged ENGINE_RUN ramp — VESC duty and engine throttle advance together
+ * (simultaneously) through 3 steps, each held for RUN_RAMP_STEP_MS. Engine
+ * throttle starts at 40 % on RUN entry. After RUN_STEP_FINAL is reached the
+ * final pair is held forever until engine_state changes. Tune step values
+ * and step duration for the engine.
+ *
+ *   step           VESC duty    Engine throttle
+ *   0  ENTRY         60 %          40 %         (held 2 s)
+ *   1  MID           70 %          55 %         (held 2 s)
+ *   2  FINAL         75 %          65 %         (steady state — held forever)
+ */
+#define RUN_RAMP_STEP_MS         2000u   /* hold each step this long */
+
+typedef enum {
+    RUN_STEP_0_ENTRY = 0,    /* VESC 60 %, engine 40 % */
+    RUN_STEP_1_MID   = 1,    /* VESC 70 %, engine 55 % */
+    RUN_STEP_2_FINAL = 2,    /* VESC 75 %, engine 65 % — steady state */
+    RUN_STEP_COUNT
+} run_ramp_step_t;
+
+#define RUN_STEP_LAST RUN_STEP_2_FINAL   /* hold forever once here */
+
+/* Per-step targets, indexed by run_ramp_step_t. */
+static const uint16_t s_run_duty_by_step[RUN_STEP_COUNT] = { 6000, 7000, 7500 };
+static const uint16_t s_run_thr_by_step[RUN_STEP_COUNT]  = { 4000, 5500, 6500 };
+
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[256];
 
@@ -96,10 +122,12 @@ static ctl_v1_state_t  s_v1_state;
 static ctl_v1_params_t s_v1_params;
 #endif
 
-static engine_state_t s_prev_engine_state;
-static swap_phase_t   s_swap_phase;
-static uint32_t       s_swap_tick;
-static bool           s_switch_prev;
+static engine_state_t  s_prev_engine_state;
+static swap_phase_t    s_swap_phase;
+static uint32_t        s_swap_tick;
+static bool            s_switch_prev;
+static run_ramp_step_t s_run_step;
+static uint32_t        s_run_step_tick;
 
 static void supervisor_task(void *arg);
 
@@ -112,6 +140,8 @@ void supervisor_task_start(void) {
     s_swap_phase        = SWAP_IDLE;
     s_swap_tick         = 0;
     s_switch_prev       = false;
+    s_run_step          = RUN_STEP_0_ENTRY;
+    s_run_step_tick     = 0;
 
     static const osThreadAttr_t tattr = {
         .name       = "supervisor",
@@ -189,6 +219,10 @@ static bool swap_step(uint32_t now) {
 static void on_run_entry(void) {
     pt_set_motor_type(VESC_MOTOR_TYPE_FOC);
     pt_set_invert_direction(true);
+    /* Reset RUN ramp every time we (re-)enter ENGINE_RUN so a back-and-forth
+     * RUN -> WARMUP -> RUN doesn't carry the previous run's step state. */
+    s_run_step      = RUN_STEP_0_ENTRY;
+    s_run_step_tick = osKernelGetTickCount();
 #if RUN_USE_V1_CONTROLLER
     control_law_v1_init(&s_v1_state);
 #endif
@@ -221,14 +255,30 @@ static void run_v1(uint32_t now) {
     osMutexRelease(g_pt_mtx);
 }
 #else
-/* Open-loop fixed operating point: bench bring-up before V1 is trusted. */
-static void run_fixed_setpoint(void) {
-    pt_set_setpoint_duty(RUN_DUTY_X10000, MODE_CRUISE);
+/* Open-loop staged ramp: VESC duty and engine throttle advance together
+ * through 3 steps during ENGINE_RUN. Step table and timing live above
+ * (see run_ramp_step_t). Reaches the final operating point at step 2
+ * (VESC 75 %, engine 65 %) after 2 * RUN_RAMP_STEP_MS = 4 s. */
+static void run_staged_ramp(uint32_t now) {
+    uint8_t step = (uint8_t)s_run_step;
+    if (step > (uint8_t)RUN_STEP_LAST) step = (uint8_t)RUN_STEP_LAST;
+
+    const uint16_t duty_target = s_run_duty_by_step[step];
+    const uint16_t thr_target  = s_run_thr_by_step[step];
+
+    pt_set_setpoint_duty((int16_t)duty_target, MODE_CRUISE);
     osMutexAcquire(g_pt_mtx, osWaitForever);
-    g_pt.engine_throttle.req_pct_x100 = RUN_THROTTLE_PCT_X100;
-    g_pt.ctl.duty_x10000              = RUN_DUTY_X10000;
-    g_pt.ctl.theta_pct_x100           = RUN_THROTTLE_PCT_X100;
+    g_pt.engine_throttle.req_pct_x100 = thr_target;
+    g_pt.ctl.duty_x10000              = duty_target;
+    g_pt.ctl.theta_pct_x100           = thr_target;
     osMutexRelease(g_pt_mtx);
+
+    /* Advance to next step after hold elapses. At RUN_STEP_LAST, stay there. */
+    if (s_run_step < RUN_STEP_LAST &&
+        (now - s_run_step_tick) >= RUN_RAMP_STEP_MS) {
+        s_run_step      = (run_ramp_step_t)((uint8_t)s_run_step + 1);
+        s_run_step_tick = now;
+    }
 }
 #endif
 
@@ -404,7 +454,7 @@ static void supervisor_task(void *arg) {
 #if RUN_USE_V1_CONTROLLER
                 run_v1(now);
 #else
-                run_fixed_setpoint();
+                run_staged_ramp(now);
 #endif
                 break;
             case ENGINE_WARMUP:
