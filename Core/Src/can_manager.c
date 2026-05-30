@@ -130,6 +130,12 @@ static void rx_dispatch_task(void *arg) {
                     }
                 }
             }
+            /* TERR/ALST frees a mailbox with no TX-complete IRQ, which would
+             * otherwise strand frames in tx_q forever. Poll-drain here too;
+             * critical section masks the prio-5 CAN ISR against this. */
+            taskENTER_CRITICAL();
+            can_mgr_isr_tx_complete((can_bus_t)b);
+            taskEXIT_CRITICAL();
         }
         /* TODO: replace polling with osThreadFlagsWait from ISR. */
         osDelay(1);

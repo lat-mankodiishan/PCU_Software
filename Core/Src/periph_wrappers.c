@@ -26,6 +26,8 @@ volatile uint8_t  g_can1_epvf       = 0;
 volatile uint8_t  g_can1_ewgf       = 0;
 volatile uint32_t g_can1_tx_post_ok = 0;
 volatile uint32_t g_can1_tx_post_no = 0;
+volatile uint32_t g_can1_err_irq    = 0;   /* SCE error/bus-off IRQ count */
+volatile uint32_t g_can2_err_irq    = 0;
 
 void can_hw_diag_snapshot(void) {
     uint32_t esr = hcan1.Instance->ESR;
@@ -41,6 +43,13 @@ bool can_hw_is_busoff(can_bus_t bus) {
     CAN_HandleTypeDef *h = handle_of(bus);
     if (h == 0) return false;
     return (h->Instance->ESR & CAN_ESR_BOFF) != 0u;
+}
+
+/* TERR/ALST/bus-off frees a mailbox without a TX-complete IRQ; the can_disp
+ * task poll-drains tx_q, so here we only count for diagnostics. ABOM recovers. */
+void HAL_CAN_ErrorCallback(CAN_HandleTypeDef *h) {
+    if      (h == &hcan1) g_can1_err_irq++;
+    else if (h == &hcan2) g_can2_err_irq++;
 }
 
 void can_hw_init(can_bus_t bus) {

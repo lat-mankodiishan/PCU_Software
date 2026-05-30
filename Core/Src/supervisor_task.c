@@ -21,7 +21,7 @@
 /* Flip to 1 to put V1 controller back on the wire during ENGINE_RUN. */
 #define RUN_USE_V1_CONTROLLER    0
 #define RUN_DUTY_X10000          7500      /* 75.00 % fixed FOC duty in RUN */
-#define RUN_THROTTLE_PCT_X100    6500      /* 60.00 % fixed engine throttle in RUN */
+#define RUN_THROTTLE_PCT_X100    6500      /* 65.00 % fixed engine throttle in RUN */
 
 /* Fault detection thresholds (supervisor-owned faults). */
 #define FC_THROTTLE_STALE_MS         2500u
