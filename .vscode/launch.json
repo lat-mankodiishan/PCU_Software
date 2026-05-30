@@ -50,8 +50,7 @@
                 "samplesPerSecond": "4"
             },
 
-            // ST-Link GDB Server settings (extension auto-resolves serverExe and serverCubeProgPath
-            // from CUBE_BUNDLE_PATH; override only if you need a non-default version).
+            // ST-Link GDB Server settings
             "serverHost": "localhost",
             "serverPort": "61234",
             "serverInterface": "SWD",
@@ -63,8 +62,13 @@
             "serverLogFile": "${workspaceFolder}/build/stlinkgdbserver_log.txt",
             "automaticallyKillServer": true,
 
+            // Note: If you keep this, ignore the yellow validation line. 
+            // Alternatively, manage your probe via the "STM32CUBE DEVICES AND BOARDS" sidebar panel.
+            "serverArgs": [
+                "--serial-number", "B55B5A1A000000008729F501"
+            ],
+
             // FreeRTOS thread-aware debug via ST's RTOS proxy.
-            // STM32F405 = Cortex-M4 + FPU → driverPort ARM_CM4F.
             "serverRtos": {
                 "enabled": false,
                 "driver": "freertos",
@@ -82,7 +86,6 @@
 
         {
             // Attach to a target that's already powered and flashed. No build, no flash.
-            // Useful for live debugging an already-deployed image without resetting.
             "name": "STM32Cube: ST-Link GDB Server (Attach)",
             "type": "stlinkgdbtarget",
             "request": "attach",
@@ -102,6 +105,11 @@
             },
             "serverHost": "localhost",
             "serverPort": "61234",
+            
+            "serverArgs": [
+                "--serial-number", "B55B5A1A000000008729F501"
+            ],
+
             "serverRtos": {
                 "enabled": false,
                 "driver": "freertos",
@@ -112,7 +120,6 @@
 
         {
             // Kept around for SWO/ITM printf streaming, which stlinkgdbtarget doesn't expose.
-            // No "rtos" field — ST-Link GDB Server doesn't support Cortex-Debug's RTOS option.
             "name": "Cortex-Debug: ST-Link with SWO/ITM",
             "type": "cortex-debug",
             "request": "launch",
@@ -121,11 +128,14 @@
             "servertype": "stlink",
             "device": "STM32F405RG",
             "interface": "swd",
+
+            // FIX: This is the correct property name for Cortex-Debug schema validation
+            "serialNumber": "B55B5A1A000000008729F501",
+
             "runToEntryPoint": "main",
             "showDevDebugOutput": "none",
             "svdFile": "${env:LOCALAPPDATA}/stm32cube/packs/STMicroelectronics/stm32f4xx_dfp/1.2.0/SVD/STM32F405.svd",
             "swoConfig": {
-                // HCLK on this firmware = 60 MHz (HSE 24 MHz · PLLN 80 / PLLP 2 / AHB_DIV 2).
                 "enabled": true,
                 "cpuFrequency": 60000000,
                 "swoFrequency": 2000000,

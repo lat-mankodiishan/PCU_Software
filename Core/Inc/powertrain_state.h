@@ -12,8 +12,8 @@
 
 /* Engine throttle servo PA8/TIM1_CH1; 1667..2879 us = 0..100 %.
  * Range scaled by 5/3.3 from 1100..1900 for 5 V PWM-as-DAC servo. */
-#define ENGINE_THROTTLE_PULSE_MIN_US   1667u
-#define ENGINE_THROTTLE_PULSE_MAX_US   2879u
+#define ENGINE_THROTTLE_PULSE_MIN_US   1000u
+#define ENGINE_THROTTLE_PULSE_MAX_US   2000u
 
 typedef enum {
     FAULT_NONE                 = 0u,
