@@ -10,14 +10,13 @@
 
 #define SUP_PERIOD_MS           200        /* 5 Hz, matches sensor_task */
 
-/* Crank duty + CRANK->RUN motor-swap timings; copied from expt sweep profile. */
+/* Crank duty + CRANK->RUN motor-swap timings; copied from expt sweep profile.
+ * After SWAP_LOCK the supervisor commits ENGINE_RUN directly; run_staged_ramp
+ * takes over on the next tick (no PRIME phase). */
 #define CRANK_BLDC_DUTY_X10000   4200      /* 42.00 % */
 #define CRANK_THROTTLE_PCT_X100  4500      /* 45.00 % engine throttle while cranking */
 #define SWAP_BLEED_MS             300      /* BLDC I=0 before motor_type swap */
 #define SWAP_LOCK_MS             1000      /* FOC inverted I=0 observer lock */
-#define SWAP_PRIME_MS             500      /* open-loop hold before V1 takes over */
-#define PRIME_DUTY_X10000        6000      /* 60.00 % FOC inverted duty during PRIME */
-#define PRIME_THROTTLE_PCT_X100  6000      /* 60.00 % engine throttle during PRIME */
 
 /* Flip to 1 to put V1 controller back on the wire during ENGINE_RUN. */
 #define RUN_USE_V1_CONTROLLER    0
@@ -85,7 +84,6 @@ typedef enum {
     SWAP_IDLE  = 0,
     SWAP_BLEED = 1,
     SWAP_LOCK  = 2,
-    SWAP_PRIME = 3,
 } swap_phase_t;
 
 /* Staged ENGINE_RUN ramp — VESC duty and engine throttle advance together
@@ -112,7 +110,7 @@ typedef enum {
 
 /* Per-step targets, indexed by run_ramp_step_t. */
 static const uint16_t s_run_duty_by_step[RUN_STEP_COUNT] = { 6000, 7000, 7500 };
-static const uint16_t s_run_thr_by_step[RUN_STEP_COUNT]  = { 4000, 5500, 6500 };
+static const uint16_t s_run_thr_by_step[RUN_STEP_COUNT]  = { 4500, 5500, 6500 };
 
 static StaticTask_t s_tcb;
 static StackType_t  s_stack[256];
@@ -187,21 +185,11 @@ static bool swap_step(uint32_t now) {
         return true;
 
     case SWAP_LOCK:
-        /* FOC inverted I=0; observer locks before duty is applied. */
+        /* FOC inverted I=0; observer locks before duty is applied. After
+         * SWAP_LOCK_MS, commit ENGINE_RUN directly — run_staged_ramp picks
+         * up next tick (VESC 60 %, engine 40 % at step 0). */
         pt_set_setpoint(0, MODE_TAKEOFF);
         if (elapsed >= SWAP_LOCK_MS) {
-            s_swap_phase = SWAP_PRIME;
-            s_swap_tick  = now;
-        }
-        return true;
-
-    case SWAP_PRIME:
-        /* Open-loop prime at PRIME_DUTY/PRIME_THROTTLE before V1 takes over. */
-        pt_set_setpoint_duty(PRIME_DUTY_X10000, MODE_TAKEOFF);
-        osMutexAcquire(g_pt_mtx, osWaitForever);
-        g_pt.engine_throttle.req_pct_x100 = PRIME_THROTTLE_PCT_X100;
-        osMutexRelease(g_pt_mtx);
-        if (elapsed >= SWAP_PRIME_MS) {
             s_swap_phase = SWAP_IDLE;
             pt_set_engine_state(ENGINE_RUN);
             osMutexAcquire(g_pt_mtx, osWaitForever);
